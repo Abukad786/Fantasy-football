@@ -534,9 +534,8 @@ function coachContext() {
       L.push(`- ${c.player}: rank ${c.overallRank ?? '-'}, captain ${ctx.players.get(cap?.element)?.web_name ?? '-'}, squad: ${c.picks.picks.map((p) => ctx.players.get(p.element)?.web_name).join(', ')}${tr.length ? `; recent transfers ${tr.join(', ')}` : ''}`);
     }
   }
-  if (cr?.list?.some((c) => c.videos?.items?.length)) {
-    L.push(`Latest creator videos: ${cr.list.flatMap((c) => (c.videos?.items || []).slice(0, 2).map((v) => `${c.player}: "${v.title}"`)).join('; ')}`);
-  }
+  const vidLines = (settings.creators || []).flatMap((c) => (videoCache.get(ytKey(c))?.items || []).slice(0, 2).map((v) => `${c.name}: "${v.title}"`));
+  if (vidLines.length) L.push(`Latest creator videos: ${vidLines.join('; ')}`);
   const I = M.insightLists(ctx, H);
   L.push(`\n## Best projected players (next ${H} GWs), for transfer targets`);
   for (const t of [1, 2, 3, 4]) L.push(`${M.POS[t]}: ${I.byPos[t].slice(0, 8).map((x) => `${x.p.web_name} ${tShort(x.p.team)} £${M.price(x.p)}m xP ${x.proj.toFixed(1)} own ${x.p.selected_by_percent}%`).join('; ')}`);
@@ -686,24 +685,40 @@ function parseYt(v) {
   return m ? { yt: '@' + m[1], ytId: null } : { yt: null, ytId: null };
 }
 
+// YouTube videos load separately so a slow YouTube never holds up the page.
+const videoCache = new Map(); // creator key -> {items} | null (failed); missing = still loading
+const ytKey = (c) => c.ytId || c.yt || '';
+function loadCreatorVideos(fresh = false) {
+  for (const c of settings.creators || []) {
+    const k = ytKey(c);
+    if (!k || (!fresh && videoCache.has(k))) continue;
+    const timeout = new Promise((r) => setTimeout(() => r(null), 20000));
+    Promise.race([youtube(c, { fresh }).catch(() => null), timeout]).then((v) => {
+      videoCache.set(k, v && v.items?.length ? v : null);
+      if ((location.hash.slice(1) || '').startsWith('creators') && !$('#creators-form')?.contains(document.activeElement)) render();
+    });
+  }
+}
+
 async function loadCreators(fresh = false) {
   const ctx = state.ctx, gw = ctx.current?.id;
   const list = settings.creators || [];
+  loadCreatorVideos(fresh);
   const out = await pool(list, 3, async (c) => {
-    const [videos, entry, picks, history, transfers] = await Promise.all([
-      c.yt || c.ytId ? youtube(c, { fresh }).catch(() => null) : null,
+    const [entry, picks, history, transfers] = await Promise.all([
       c.fplId ? fpl.entry(c.fplId, { fresh }).catch(() => null) : null,
       c.fplId && gw ? fpl.picks(c.fplId, gw, { fresh }).catch(() => null) : null,
       c.fplId ? fpl.history(c.fplId, { fresh }).catch(() => null) : null,
       c.fplId ? fpl.transfers(c.fplId, { fresh }).catch(() => []) : [],
     ]);
-    return { ...c, videos, entryData: entry, entry: c.fplId, rank: null, overallRank: entry?.summary_overall_rank, total: entry?.summary_overall_points ?? 0, eventTotal: picks?.entry_history?.points ?? entry?.summary_event_points, picks, history, transfers, player: c.name, name: entry?.name || c.name };
+    return { ...c, entryData: entry, entry: c.fplId, rank: null, overallRank: entry?.summary_overall_rank, total: entry?.summary_overall_points ?? 0, eventTotal: picks?.entry_history?.points ?? entry?.summary_event_points, picks, history, transfers, player: c.name || 'Creator', name: entry?.name || c.name || 'Creator' };
   });
   const withTeams = out.filter((c) => c && c.picks);
   const me = { entry: settings.teamId, name: state.entry?.name || 'You', player: 'You', rank: null, total: state.entry?.summary_overall_points ?? 0, eventTotal: state.entry?.summary_event_points, picks: state.picks, history: state.history };
-  const cmp = withTeams.length && state.picks ? M.compareRivals(me, withTeams, ctx, { horizon: settings.horizon }) : null;
+  let cmp = null;
+  try { cmp = withTeams.length && state.picks ? M.compareRivals(me, withTeams, ctx, { horizon: settings.horizon }) : null; } catch (e) { console.warn('creator compare', e); }
   state.creators = { list: out.filter(Boolean), cmp, loadedAt: Date.now() };
-  if (cmp) recordSnapshot({ id: 'creators', league: { name: 'Creators' }, cmp });
+  if (cmp) { try { recordSnapshot({ id: 'creators', league: { name: 'Creators' }, cmp }); } catch (e) { console.warn(e); } }
   return state.creators;
 }
 
@@ -717,7 +732,9 @@ async function viewCreators() {
   const mine = new Set((state.picks?.picks || []).map((p) => p.element));
 
   const creatorCard = (c, i) => {
-    const vids = c.videos?.items?.slice(0, 3) || [];
+    const vk = ytKey(c);
+    const vstate = vk ? (videoCache.has(vk) ? videoCache.get(vk) : 'loading') : null;
+    const vids = vstate && vstate !== 'loading' ? vstate.items.slice(0, 3) : [];
     const e = c.entryData;
     const cap = c.picks?.picks.find((p) => p.is_captain);
     const tIn = (c.transfers || []).filter((t) => t.event === gw);
@@ -736,7 +753,7 @@ async function viewCreators() {
       : c.fplId ? `<p class="muted">Couldn't load FPL team ${c.fplId}. Check the ID below.</p>` : `<p class="muted">Add their FPL team ID below to see their squad.</p>`}
       <h3>Latest videos</h3>
       ${vids.length ? `<ul class="news">${vids.map((v) => `<li><a href="${esc(v.link)}" target="_blank" rel="noopener">${v.image ? `<img src="${esc(v.image)}" alt="" loading="lazy">` : ''}<div><div class="ntitle">${esc(v.title)}</div><div class="sub">${timeAgo(v.published)}</div></div></a></li>`).join('')}</ul>`
-        : c.yt || c.ytId ? empty("Couldn't load videos right now.") : empty('No YouTube channel set.')}
+        : vstate === 'loading' ? empty('Loading videos…') : vk ? empty(`Couldn't load videos right now. <a href="https://www.youtube.com/${c.ytId ? 'channel/' + esc(c.ytId) : esc(c.yt)}/videos" target="_blank" rel="noopener">Open on YouTube</a>`) : empty('No YouTube channel set.')}
     </section>`;
   };
 
@@ -935,6 +952,7 @@ document.addEventListener('submit', async (ev) => {
   if (f.id === 'creators-form') {
     saveCreatorsForm(true);
     state.creators = null;
+    loadCreatorVideos();
     toast('Saved');
     return render();
   }

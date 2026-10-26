@@ -40,7 +40,7 @@ const FPL_ROUTES = [
 const cache = new Map(); // key -> { expires, status, body }
 const inflight = new Map();
 
-async function cachedFetch(url, ttl, parse = 'json') {
+async function cachedFetch(url, ttl, parse = 'json', timeoutMs = 15000) {
   const hit = cache.get(url);
   if (hit && hit.expires > Date.now()) return hit;
   if (inflight.has(url)) return inflight.get(url);
@@ -53,9 +53,14 @@ async function cachedFetch(url, ttl, parse = 'json') {
           'Accept-Language': 'en-GB,en;q=0.9',
           ...(parse === 'html' ? { Cookie: 'CONSENT=YES+1; SOCS=CAI' } : {}),
         },
-        signal: AbortSignal.timeout(15000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
-      const body = await res.text();
+      let body = await res.text();
+      if (parse === 'html') {
+        // Only keep what's needed to find a channel ID; YouTube pages are huge.
+        const m = body.match(/"externalId":"UC[\w-]{22}"|channel\/UC[\w-]{22}|"channelId":"UC[\w-]{22}"/);
+        body = m ? m[0] : '';
+      }
       const entry = { status: res.status, body, expires: Date.now() + (res.ok ? ttl * 1000 : 15000) };
       cache.set(url, entry);
       if (cache.size > 2000) cache.delete(cache.keys().next().value);
@@ -136,7 +141,7 @@ async function getNews() {
 const channelIds = new Map();
 async function resolveChannel(handle) {
   if (channelIds.has(handle)) return channelIds.get(handle);
-  const r = await cachedFetch(`https://www.youtube.com/${handle}`, 86400, 'html');
+  const r = await cachedFetch(`https://www.youtube.com/${handle}`, 86400, 'html', 8000);
   const m = r.status === 200 && (r.body.match(/"externalId":"(UC[\w-]{22})"/) || r.body.match(/channel\/(UC[\w-]{22})/) || r.body.match(/"channelId":"(UC[\w-]{22})"/));
   const id = m ? m[1] : null;
   if (id) channelIds.set(handle, id);
@@ -148,7 +153,7 @@ async function getYouTube(params) {
   if (id && !/^UC[\w-]{22}$/.test(id)) id = null;
   if (!id && handle && /^@[\w.-]{3,40}$/.test(handle)) id = await resolveChannel(handle);
   if (!id) return { ok: false, error: 'channel_not_found', items: [] };
-  const r = await cachedFetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${id}`, 900, 'xml');
+  const r = await cachedFetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${id}`, 900, 'xml', 8000);
   if (r.status !== 200) return { ok: false, channel: id, error: 'feed_unavailable', items: [] };
   return { ok: true, channel: id, items: parseFeed(r.body, { source: handle || id }).slice(0, 10) };
 }
