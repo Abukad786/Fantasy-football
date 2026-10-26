@@ -27,7 +27,12 @@ jobs:
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease -PversionCode=${{ github.run_number }} --no-daemon
+          set -o pipefail
+          if ! ./gradlew assembleRelease -PversionCode=${{ github.run_number }} --no-daemon --console=plain 2>&1 | tee build.log; then
+            # Surface the error lines as annotations so they're visible without opening the log.
+            grep -E "error:|What went wrong|FAILURE|Exception|> " build.log | head -25 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          fi
           cp app/build/outputs/apk/release/app-release.apk ../gaffer.apk
       - name: Publish to Releases
         uses: softprops/action-gh-release@v2

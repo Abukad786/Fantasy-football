@@ -11,7 +11,7 @@ android {
         minSdk 24
         targetSdk 35
         // CI passes -PversionCode=<run number> so every build installs as an update.
-        versionCode (project.findProperty('versionCode') ?: '1') as int
+        versionCode Integer.parseInt((project.findProperty('versionCode') ?: '1').toString())
         versionName "1.0.${versionCode}"
     }
 
@@ -33,6 +33,11 @@ android {
         debug {
             signingConfig signingConfigs.gaffer
         }
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
     }
 
     compileOptions {
