@@ -50,9 +50,20 @@ test('transfer ideas respect budget and 3-per-club', () => {
   assert.equal(ideas.points[0].in.id, 3);
 });
 
-test('chips status uses API chip windows', () => {
-  const ctx = M.buildContext({ ...boot([base({})]), chips: [{ name: 'wildcard', number: 1, start_event: 1, stop_event: 19 }, { name: 'wildcard', number: 1, start_event: 20, stop_event: 38 }, { name: '3xc', number: 1, start_event: 1, stop_event: 19 }] }, []);
-  const s = M.chipsStatus({ chips: [{ name: 'wildcard', event: 4 }] }, ctx);
-  assert.deepEqual(s.available.map((c) => c.name).sort(), ['3xc', 'wildcard']);
-  assert.equal(s.available.find((c) => c.name === 'wildcard').until, 38);
+test('chips: used first-half chip is not shown as available', () => {
+  const ctx = M.buildContext({ ...boot([base({})]), chips: [
+    { name: 'wildcard', number: 1, start_event: 2, stop_event: 19 }, { name: 'wildcard', number: 1, start_event: 20, stop_event: 38 },
+    { name: '3xc', number: 1, start_event: 1, stop_event: 19 }, { name: '3xc', number: 1, start_event: 20, stop_event: 38 }] }, []);
+  const s = M.chipsStatus({ chips: [{ name: 'wildcard', event: 4 }] }, ctx); // next GW is 10
+  assert.deepEqual(s.available.map((c) => c.name), ['3xc']);
+  assert.deepEqual(s.used, [{ name: 'wildcard', event: 4 }]);
+  assert.deepEqual(s.later.map((c) => c.name).sort(), ['3xc', 'wildcard']);
+});
+
+test('chips: second half resets', () => {
+  const b = boot([base({})]);
+  b.events = b.events.map((e) => ({ ...e, is_current: e.id === 21, is_next: e.id === 22, finished: e.id < 21 }));
+  const ctx = M.buildContext({ ...b, chips: [{ name: 'wildcard', number: 1, start_event: 2, stop_event: 19 }, { name: 'wildcard', number: 1, start_event: 20, stop_event: 38 }] }, []);
+  assert.deepEqual(M.chipsStatus({ chips: [{ name: 'wildcard', event: 4 }] }, ctx).available.map((c) => c.name), ['wildcard']);
+  assert.deepEqual(M.chipsStatus({ chips: [{ name: 'wildcard', event: 4 }, { name: 'wildcard', event: 21 }] }, ctx).available, []);
 });

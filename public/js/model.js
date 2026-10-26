@@ -256,29 +256,22 @@ export function transferIdeas(squadPlayers, bank, ctx, { horizon = 5, own = new 
 const CHIP_LABEL = { wildcard: 'Wildcard', freehit: 'Free Hit', bboost: 'Bench Boost', '3xc': 'Triple Captain', manager: 'Assistant Manager' };
 export const chipLabel = (n) => CHIP_LABEL[n] || n;
 
+/**
+ * Chips for the next deadline. FPL gives one set per half-season (GW1-19, GW20-38),
+ * so a chip only counts as "left" if it's unused in the window that contains the next GW.
+ * `used` = chips played this season; `available` = usable now; `later` = next window's set.
+ */
 export function chipsStatus(history, ctx) {
-  const used = (history?.chips || []).map((c) => ({ name: c.name, event: c.event }));
-  const gw = ctx.current?.id || ctx.startGw;
-  if (ctx.chipsDef && ctx.chipsDef.length) {
-    const available = [];
-    for (const def of ctx.chipsDef) {
-      if (gw > def.stop_event) continue; // window closed
-      const usedInWindow = used.filter((u) => u.name === def.name && u.event >= def.start_event && u.event <= def.stop_event).length;
-      if (usedInWindow < (def.number || 1)) available.push({ name: def.name, until: def.stop_event });
-    }
-    // de-duplicate by name, keep earliest-expiring
-    const seen = new Set();
-    return { used, available: available.filter((c) => (seen.has(c.name) ? false : seen.add(c.name))) };
-  }
-  // Fallback when the API doesn't describe chip windows: assume one of each per half-season.
-  const half = gw <= 19 ? [1, 19] : [20, 38];
-  const names = ['wildcard', 'freehit', 'bboost', '3xc'];
-  return {
-    used,
-    available: names
-      .filter((n) => !used.some((u) => u.name === n && u.event >= half[0] && u.event <= half[1]))
-      .map((n) => ({ name: n, until: half[1] })),
-  };
+  const used = (history?.chips || []).map((c) => ({ name: c.name, event: c.event })).sort((a, b) => a.event - b.event);
+  const gw = ctx.startGw;
+  const defs = ctx.chipsDef && ctx.chipsDef.length
+    ? ctx.chipsDef.map((d) => ({ name: d.name, number: d.number || 1, start: d.start_event, stop: d.stop_event }))
+    : ['wildcard', 'freehit', 'bboost', '3xc'].flatMap((name) => [{ name, number: 1, start: 1, stop: 19 }, { name, number: 1, start: 20, stop: 38 }]);
+  const unused = (d) => used.filter((u) => u.name === d.name && u.event >= d.start && u.event <= d.stop).length < d.number;
+  const available = defs.filter((d) => gw >= d.start && gw <= d.stop && unused(d)).map((d) => ({ name: d.name, until: d.stop }));
+  const later = defs.filter((d) => d.start > gw).map((d) => ({ name: d.name, from: d.start }));
+  const seen = new Set();
+  return { used, available: available.filter((c) => (seen.has(c.name) ? false : seen.add(c.name))), later };
 }
 
 // ---------- live ----------

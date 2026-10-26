@@ -348,7 +348,7 @@ async function viewLeagues() {
   const rows = [...cmp.rows].sort((a, b) => (a.rank ?? 1e9) - (b.rank ?? 1e9));
   const showLive = !!state.live;
 
-  const table = `<div class="scroll-x"><table class="tbl dense rivals"><thead><tr><th>#</th><th>Team</th><th class="num">Total</th><th class="num">Gap</th><th class="num">GW${showLive ? ' live' : ''}</th><th class="num">xP ${settings.horizon}GW</th><th class="num">Shared</th><th>Captain</th><th>Chips left</th><th class="num">Value</th><th class="num">Hits</th></tr></thead><tbody>
+  const table = `<div class="scroll-x"><table class="tbl dense rivals"><thead><tr><th>#</th><th>Team</th><th class="num">Total</th><th class="num">Gap</th><th class="num">GW${showLive ? ' live' : ''}</th><th class="num">xP ${settings.horizon}GW</th><th class="num">Shared</th><th>Captain</th><th>Chips <span class="muted">(left · <s>used</s>)</span></th><th class="num">Value</th><th class="num">Hits</th></tr></thead><tbody>
     ${rows.map((r) => {
       const mv = r.lastRank && r.rank ? r.lastRank - r.rank : 0;
       return `<tr class="${r.isMe ? 'me' : ''}" ${r.isMe ? '' : `data-rival="${r.entry}"`}>
@@ -360,7 +360,7 @@ async function viewLeagues() {
       <td class="num">${fmt(r.proj, 0)}</td>
       <td class="num">${r.isMe ? '–' : `${r.shared}/15`}</td>
       <td>${r.captain ? esc(r.captain.web_name) : '–'}</td>
-      <td class="chips">${r.chips.available.map((c) => `<span class="chipb" title="${M.chipLabel(c.name)} (until GW${c.until})">${chipShort(c.name)}</span>`).join('') || '–'}</td>
+      <td class="chips">${r.chips.available.map((c) => `<span class="chipb" title="${M.chipLabel(c.name)} available until GW${c.until}">${chipShort(c.name)}</span>`).join('') || '<span class="muted">none left</span>'}${r.chips.used.length ? `<div class="sub">${r.chips.used.map((c) => `<s title="${M.chipLabel(c.name)} played GW${c.event}">${chipShort(c.name)}</s> GW${c.event}`).join(', ')}</div>` : ''}</td>
       <td class="num">${r.value != null ? `£${fmt(r.value)}` : '–'}${r.bank != null ? `<div class="sub">£${fmt(r.bank)} itb</div>` : ''}</td>
       <td class="num">${r.hits ? `-${r.hits}` : 0}</td></tr>`;
     }).join('')}
@@ -405,7 +405,7 @@ function rivalSheet(entryId) {
     <h3>Recent transfers</h3>
     ${recent.length ? `<ul class="plain">${recent.map((t) => `<li>GW${t.event}: ${esc(ctx.players.get(t.element_out)?.web_name)} → <b>${esc(ctx.players.get(t.element_in)?.web_name)}</b></li>`).join('')}</ul>` : empty('None in the last 3 GWs.')}
     <h3>Chips</h3>
-    <p>Used: ${r.chips.used.map((c) => `${M.chipLabel(c.name)} (GW${c.event})`).join(', ') || 'none'}<br>Left: ${r.chips.available.map((c) => M.chipLabel(c.name)).join(', ') || 'none'}</p>
+    <p>Used: ${r.chips.used.map((c) => `${M.chipLabel(c.name)} (GW${c.event})`).join(', ') || 'none'}<br>Left now: ${r.chips.available.map((c) => `${M.chipLabel(c.name)} (until GW${c.until})`).join(', ') || 'none'}${r.chips.later.length ? `<br><span class="muted">New set from GW${r.chips.later[0].from}: ${r.chips.later.map((c) => M.chipLabel(c.name)).join(', ')}</span>` : ''}</p>
   `);
 }
 
