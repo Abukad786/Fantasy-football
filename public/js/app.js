@@ -120,13 +120,13 @@ async function loadLeague(leagueId, fresh = false) {
     lastRank: meRow?.last_rank ?? null,
     total: meRow?.total ?? state.entry?.summary_overall_points ?? 0,
     eventTotal: meRow?.event_total ?? state.entry?.summary_event_points ?? 0,
-    picks: state.picks,
+    picks: effectivePicks(),
     history: state.history,
   };
   const valid = rivals.filter(Boolean);
   const cmp = M.compareRivals(me, valid, ctx, { horizon: settings.horizon });
   const plan = M.leaguePlan(cmp, me, ctx, settings.horizon);
-  if (state.live) for (const r of cmp.rows) r.live = M.livePoints(r.picks, state.live);
+  if (state.live) for (const r of cmp.rows) r.live = M.livePoints(r.isMe ? state.picks : r.picks, state.live);
   const data = { id: leagueId, league, rows, me, meFound: idx !== -1, rivals: valid, cmp, plan, loadedAt: Date.now() };
   state.leagues.set(leagueId, data);
   recordSnapshot(data);
@@ -216,11 +216,72 @@ async function render() {
   main.scrollTop = 0;
 }
 
+// ---------- planner: your team for the next deadline ----------
+// FPL keeps new transfers private until the deadline, so the manager records them here.
+const planGw = () => state.ctx?.next?.id || null;
+const planKey = () => `gaffer:plan:${settings.teamId}:${planGw()}`;
+const emptyPlan = () => ({ moves: [], captain: null, vice: null });
+function getPlan() { return planGw() ? { ...emptyPlan(), ...readLS(planKey(), {}) } : emptyPlan(); }
+function hasPlan() { const p = getPlan(); return !!(planGw() && state.picks && (p.moves.length || p.captain || p.vice)); }
+
+/** Picks with planned transfers and captaincy applied (or the real picks if no plan). */
+function effectivePicks() {
+  if (!state.picks || !hasPlan()) return state.picks;
+  const p = getPlan(), P = state.ctx.players;
+  const swap = new Map(p.moves.map((m) => [m.out, m.in]));
+  const picks = state.picks.picks.map((pk) => ({ ...pk, element: swap.get(pk.element) ?? pk.element }));
+  const has = (id) => id && picks.some((x) => x.element === id);
+  const cap = has(p.captain) ? p.captain : picks.find((x) => x.is_captain)?.element;
+  let vice = has(p.vice) ? p.vice : picks.find((x) => x.is_vice_captain)?.element;
+  if (vice === cap) vice = picks.find((x) => x.position <= 11 && x.element !== cap)?.element;
+  for (const x of picks) {
+    x.is_captain = x.element === cap;
+    x.is_vice_captain = x.element === vice;
+    x.multiplier = x.position > 11 ? 0 : x.is_captain ? 2 : 1;
+  }
+  const spent = p.moves.reduce((sum, m) => sum + ((P.get(m.in)?.now_cost || 0) - (P.get(m.out)?.now_cost || 0)), 0);
+  const eh = state.picks.entry_history || {};
+  return { ...state.picks, active_chip: null, picks, planned: true, entry_history: { ...eh, bank: (eh.bank ?? 0) - spent } };
+}
+
+function savePlan(p) {
+  writeLS(planKey(), p);
+  recomputeComparisons();
+  render();
+}
+function planTransfer(outId, inId) {
+  const p = getPlan();
+  const prev = p.moves.find((m) => m.in === outId); // selling someone you planned to buy
+  if (prev) {
+    if (prev.out === inId) p.moves = p.moves.filter((m) => m !== prev); // back to the original player
+    else prev.in = inId;
+  } else p.moves.push({ out: outId, in: inId });
+  if (p.captain === outId) p.captain = null;
+  if (p.vice === outId) p.vice = null;
+  savePlan(p);
+  closeSheet();
+  const P = state.ctx.players;
+  toast(`Planned: ${P.get(outId)?.web_name} → ${P.get(inId)?.web_name}`);
+}
+function myPickIds() { return new Set((effectivePicks()?.picks || []).map((p) => p.element)); }
+
+// Re-run rival comparisons against your planned squad (no refetch needed).
+function recomputeComparisons() {
+  for (const d of state.leagues.values()) {
+    d.me = { ...d.me, picks: effectivePicks() };
+    d.cmp = M.compareRivals(d.me, d.rivals, state.ctx, { horizon: settings.horizon });
+    d.plan = M.leaguePlan(d.cmp, d.me, state.ctx, settings.horizon);
+    if (state.live) for (const r of d.cmp.rows) r.live = M.livePoints(r.isMe ? state.picks : r.picks, state.live);
+  }
+  state.creators = null;
+}
+
 function myPlayers() {
-  return state.picks ? M.squadFromPicks(state.picks, state.ctx) : [];
+  const p = effectivePicks();
+  return p ? M.squadFromPicks(p, state.ctx) : [];
 }
 function bank() {
-  const h = state.picks?.entry_history || state.history?.current?.at(-1);
+  const h = effectivePicks()?.entry_history || state.history?.current?.at(-1);
   return h ? h.bank : 0;
 }
 
@@ -285,11 +346,11 @@ async function viewHome() {
   `;
 }
 
-function pitchChip(pk, ctx) {
+function pitchChip(pk, ctx, showLive = true) {
   const p = pk.player;
   const fx = M.fixtureRun(p.team, ctx, 1)[0];
   const pr = M.project(p, ctx, 1).next;
-  const livePts = state.live ? state.live.elements.find((e) => e.id === p.id)?.stats.total_points : null;
+  const livePts = showLive && state.live ? state.live.elements.find((e) => e.id === p.id)?.stats.total_points : null;
   return `<button class="pchip" data-player="${p.id}">
     <span class="shirt" style="--c:${teamColor(p.team)}">${esc(tShort(p.team))}</span>
     ${pk.is_captain ? '<span class="cap">C</span>' : pk.is_vice_captain ? '<span class="cap v">V</span>' : ''}
@@ -304,8 +365,16 @@ async function viewTeam() {
   const ctx = state.ctx;
   const sq = myPlayers();
   if (!sq.length) return card('No squad yet', empty('Your picks will appear once the first deadline has passed.'));
+  const planned = hasPlan();
   const xi = sq.filter((x) => x.position <= 11), bench = sq.filter((x) => x.position > 11);
-  const rows = [1, 2, 3, 4].map((t) => `<div class="prow">${xi.filter((x) => x.player.element_type === t).map((x) => pitchChip(x, ctx)).join('')}</div>`);
+  const rows = [1, 2, 3, 4].map((t) => `<div class="prow">${xi.filter((x) => x.player.element_type === t).map((x) => pitchChip(x, ctx, !planned)).join('')}</div>`);
+  const pl = getPlan(), P = ctx.players;
+  const planCard = planGw() ? card(`Your team for GW${planGw()}`, `
+    ${planned ? `<ul class="plan-moves">${pl.moves.map((m, i) => `<li><span class="bad">${esc(P.get(m.out)?.web_name)}</span> → <b class="good">${esc(P.get(m.in)?.web_name)}</b> <span class="muted">£${M.price(P.get(m.in))}m</span><button class="x" data-action="plan-undo" data-i="${i}" aria-label="Undo">✕</button></li>`).join('')}
+      ${pl.captain ? `<li>Captain: <b>${esc(P.get(pl.captain)?.web_name)}</b></li>` : ''}${pl.vice ? `<li>Vice-captain: <b>${esc(P.get(pl.vice)?.web_name)}</b></li>` : ''}</ul>
+      <p class="small">${pl.moves.length} transfer${pl.moves.length === 1 ? '' : 's'} · £${fmt(bank() / 10)}m left in the bank${bank() < 0 ? ' <b class="bad">(over budget)</b>' : ''}</p>
+      <button class="btn ghost small-btn" data-action="plan-reset">Clear plan</button>`
+    : `<p class="small">FPL keeps your new transfers private until the deadline, so this shows your GW${ctx.current?.id} team. Made transfers or changed captain for GW${planGw()}? Tap a player on the pitch → <b>Transfer out</b> or <b>Make captain</b>. Everything in the app, including the Coach and league comparisons, then uses your new team.</p>`}`, planned ? 'plan-on' : '') : '';
   const players = sq.map((x) => x.player);
 
   const lg = currentLeague && state.leagues.get(currentLeague) || state.leagues.get(settings.leagues[0]);
@@ -314,14 +383,16 @@ async function viewTeam() {
   const ideas = M.transferIdeas(players, bank(), ctx, { horizon: settings.horizon, own });
   const ideaRow = (i, rel) => `<tr><td>${playerLink(i.out)}<div class="sub">${fmt(i.outProj)} xP</div></td><td class="arrow">→</td>
     <td>${playerLink(i.in)} <span class="muted">£${M.price(i.in)}</span><div class="sub">${fmt(i.inProj)} xP · ${tShort(i.in.team)} ${lg ? `· ${pct(i.candOwn)} rivals own` : ''}</div></td>
-    <td class="num ${rel ? '' : 'good'}">+${fmt(rel ? i.rel : i.gain)}</td></tr>`;
+    <td class="num ${rel ? '' : 'good'}">+${fmt(rel ? i.rel : i.gain)}${planGw() ? `<div><button class="mini" data-plan-in="${i.in.id}" data-out="${i.out.id}">Add to plan</button></div>` : ''}</td></tr>`;
 
   const sorted = [...players].sort((a, b) => a.element_type - b.element_type || M.project(b, ctx, settings.horizon).total - M.project(a, ctx, settings.horizon).total);
   return `
+  ${planCard}
   <section class="pitch">
+    ${planned ? `<div class="chip-on">Planned team · GW${planGw()}</div>` : ''}
     ${rows.join('')}
-    <div class="bench"><span class="muted">Bench</span>${bench.map((x) => pitchChip(x, ctx)).join('')}</div>
-    ${state.picks.active_chip ? `<div class="chip-on">${M.chipLabel(state.picks.active_chip)} active</div>` : ''}
+    <div class="bench"><span class="muted">Bench</span>${bench.map((x) => pitchChip(x, ctx, !planned)).join('')}</div>
+    ${!planned && state.picks.active_chip ? `<div class="chip-on">${M.chipLabel(state.picks.active_chip)} active</div>` : ''}
   </section>
   ${card('Captain picks — next GW', `<table class="tbl"><thead><tr><th>Player</th><th>Fixture</th><th class="num">xP</th>${lg ? '<th class="num">Rivals capt.</th>' : ''}</tr></thead><tbody>
     ${caps.map((c) => `<tr><td>${playerLink(c.p)}</td><td>${fxChips(M.fixtureRun(c.p.team, ctx, 1)[0]?.fxs || [])}</td><td class="num">${fmt(c.pts)}</td>${lg ? `<td class="num">${pct(c.rivalCap)}</td>` : ''}</tr>`).join('')}
@@ -399,7 +470,7 @@ function rivalSheet(entryId) {
   const r = d?.cmp.rows.find((x) => x.entry === entryId);
   if (!r) return;
   const ctx = state.ctx;
-  const mine = new Set((state.picks?.picks || []).map((p) => p.element));
+  const mine = myPickIds();
   const sq = r.picks ? M.squadFromPicks(r.picks, ctx) : [];
   const gw = ctx.current?.id;
   const recent = (r.transfers || []).filter((t) => t.event >= (gw || 0) - 2).slice(0, 10);
@@ -417,7 +488,7 @@ function rivalSheet(entryId) {
 async function viewInsights() {
   const ctx = state.ctx;
   const L = M.insightLists(ctx, settings.horizon);
-  const mine = new Set((state.picks?.picks || []).map((p) => p.element));
+  const mine = myPickIds();
   const mark = (p) => (mine.has(p.id) ? ' <span class="mine">●</span>' : '');
   const pos = +(location.hash.split('/')[1] || 3);
   const posTabs = [1, 2, 3, 4].map((t) => `<a class="seg ${t === pos ? 'on' : ''}" href="#insights/${t}">${M.POS[t]}</a>`).join('');
@@ -459,7 +530,7 @@ async function viewNews() {
   const filter = decodeURIComponent(location.hash.split('/')[1] || 'all');
   const sources = state.news.sources || [];
   const items = state.news.items.filter((n) => filter === 'all' || (filter === 'fpl' ? n.fpl : n.source === filter));
-  const mine = new Set((state.picks?.picks || []).map((p) => p.element));
+  const mine = myPickIds();
   const rivalOwn = new Map();
   for (const id of settings.leagues) {
     const d = state.leagues.get(id);
@@ -510,7 +581,10 @@ function coachContext() {
   }
   const sq = myPlayers();
   if (sq.length) {
-    L.push(`\n## Squad (GW${ctx.current?.id}${state.picks?.active_chip ? `, chip active: ${M.chipLabel(state.picks.active_chip)}` : ''})`);
+    if (hasPlan()) {
+      const pl = getPlan();
+      L.push(`\n## Squad for GW${planGw()} INCLUDING the manager's planned/made transfers (${pl.moves.length}): ${pl.moves.map((m) => `${ctx.players.get(m.out)?.web_name} -> ${ctx.players.get(m.in)?.web_name}`).join(', ') || 'none'}. Bank after these: £${(bank() / 10).toFixed(1)}m.`);
+    } else L.push(`\n## Squad (as picked for GW${ctx.current?.id}${state.picks?.active_chip ? `, chip active: ${M.chipLabel(state.picks.active_chip)}` : ''}; the manager may have made transfers for GW${planGw() ?? '-'} that FPL doesn't show until the deadline, so ask if unsure)`);
     for (const x of sq) L.push(`- ${x.position > 11 ? 'BENCH ' : ''}${x.is_captain ? '(C) ' : x.is_vice_captain ? '(VC) ' : ''}${p2(x.player)}`);
     const ideas = M.transferIdeas(sq.map((x) => x.player), bank(), ctx, { horizon: H, limit: 5 });
     if (ideas.points.length) L.push(`App's top transfer ideas (xP gain over ${H} GWs): ${ideas.points.map((i) => `${i.out.web_name} -> ${i.in.web_name} £${M.price(i.in)}m (+${i.gain.toFixed(1)})`).join('; ')}`);
@@ -714,9 +788,9 @@ async function loadCreators(fresh = false) {
     return { ...c, entryData: entry, entry: c.fplId, rank: null, overallRank: entry?.summary_overall_rank, total: entry?.summary_overall_points ?? 0, eventTotal: picks?.entry_history?.points ?? entry?.summary_event_points, picks, history, transfers, player: c.name || 'Creator', name: entry?.name || c.name || 'Creator' };
   });
   const withTeams = out.filter((c) => c && c.picks);
-  const me = { entry: settings.teamId, name: state.entry?.name || 'You', player: 'You', rank: null, total: state.entry?.summary_overall_points ?? 0, eventTotal: state.entry?.summary_event_points, picks: state.picks, history: state.history };
+  const me = { entry: settings.teamId, name: state.entry?.name || 'You', player: 'You', rank: null, total: state.entry?.summary_overall_points ?? 0, eventTotal: state.entry?.summary_event_points, picks: effectivePicks(), history: state.history };
   let cmp = null;
-  try { cmp = withTeams.length && state.picks ? M.compareRivals(me, withTeams, ctx, { horizon: settings.horizon }) : null; } catch (e) { console.warn('creator compare', e); }
+  try { cmp = withTeams.length && effectivePicks() ? M.compareRivals(me, withTeams, ctx, { horizon: settings.horizon }) : null; } catch (e) { console.warn('creator compare', e); }
   state.creators = { list: out.filter(Boolean), cmp, loadedAt: Date.now() };
   if (cmp) { try { recordSnapshot({ id: 'creators', league: { name: 'Creators' }, cmp }); } catch (e) { console.warn(e); } }
   return state.creators;
@@ -725,11 +799,12 @@ async function loadCreators(fresh = false) {
 async function viewCreators() {
   if (!state.creators) {
     $('#main').innerHTML = `<div class="loading">Loading creators…</div>`;
-    await loadCreators();
+    await Promise.race([loadCreators().catch((e) => console.warn(e)), new Promise((r) => setTimeout(r, 12000))]);
+    if (!state.creators) state.creators = { list: (settings.creators || []).map((c) => ({ ...c, player: c.name, name: c.name, entry: c.fplId })), cmp: null, loadedAt: Date.now() };
   }
   const ctx = state.ctx, { list, cmp } = state.creators;
   const gw = ctx.current?.id;
-  const mine = new Set((state.picks?.picks || []).map((p) => p.element));
+  const mine = myPickIds();
 
   const creatorCard = (c, i) => {
     const vk = ytKey(c);
@@ -792,7 +867,7 @@ function creatorSheet(entryId) {
   const c = state.creators?.list.find((x) => x.entry === entryId);
   if (!c?.picks) return;
   const ctx = state.ctx, gw = ctx.current?.id;
-  const mine = new Set((state.picks?.picks || []).map((p) => p.element));
+  const mine = myPickIds();
   const sq = M.squadFromPicks(c.picks, ctx);
   const chips = M.chipsStatus(c.history, ctx);
   const recent = (c.transfers || []).filter((t) => t.event >= (gw || 0) - 2).slice(0, 10);
@@ -831,7 +906,7 @@ async function viewSettings() {
       <button class="btn" type="submit">Save leagues</button></form>`) : ''}
   ${card('Updates', `<label class="switch"><input type="checkbox" id="notify" ${settings.notify ? 'checked' : ''}> Notify me about rival moves and deadlines</label>
     <p class="note">Notifications are sent when Gaffer is open or reopened.</p>`)}
-  ${card('Install on Android', `<p><b>Android app:</b> <a href="https://github.com/Abukad786/fantasy-football/releases/latest" target="_blank" rel="noopener">download gaffer.apk</a> on your phone and open it to install.</p><p class="small muted">Or open this site in Chrome and tap <b>⋮ → Install app</b>.</p><button class="btn ghost" id="install-btn" hidden>Install now</button>`)}
+  ${card('Install on Android', `<p><b>Android app:</b> <a href="/gaffer.apk" download>download gaffer.apk</a> (about 40 KB) on your phone, then open it from Downloads to install.</p><p class="small muted">Or open this site in Chrome and tap <b>⋮ → Install app</b>.</p><button class="btn ghost" id="install-btn" hidden>Install now</button>`)}
   ${card('About the data', `<p class="small">Squads, leagues, prices and stats come from the official Fantasy Premier League API. FPL's expected stats (xG, xA, xGC), defensive contributions and bonus points are supplied by Opta. Headlines link to Fantasy Football Scout, BBC Sport, The Guardian and Sky Sports. Gaffer is not affiliated with the Premier League, FPL, Opta or any publisher.</p>
     <button class="btn ghost" data-action="reset">Clear saved data</button>`)}
   `;
@@ -847,6 +922,10 @@ async function playerSheet(id) {
     <div class="ph"><span class="shirt big" style="--c:${teamColor(p.team)}">${esc(tShort(p.team))}</span>
       <div><h2>${esc(p.first_name)} ${esc(p.second_name)}</h2><p class="muted">${M.POS[p.element_type]} · ${esc(team(p.team)?.name)} · £${M.price(p)}m · ${p.selected_by_percent}% owned</p></div></div>
     ${p.news ? `<p class="warnbox">${statusDot(p)} ${esc(p.news)}</p>` : ''}
+    ${planGw() && myPickIds().has(p.id) ? `<div class="inline sheet-actions">
+      <button class="btn small-btn" data-action="plan-out" data-id="${p.id}">Transfer out</button>
+      <button class="btn ghost small-btn" data-action="plan-cap" data-id="${p.id}">Make captain</button>
+      <button class="btn ghost small-btn" data-action="plan-vice" data-id="${p.id}">Make vice</button></div>` : ''}
     <div class="statgrid">
       ${stat('Points', p.total_points)}${stat('Form', p.form)}${stat('Mins', int(p.minutes))}${stat('Starts', p.starts ?? '–')}
       ${stat('Goals', p.goals_scored)}${stat('xG', fmt(+p.expected_goals, 2))}${stat('Assists', p.assists)}${stat('xA', fmt(+p.expected_assists, 2))}
@@ -866,6 +945,36 @@ async function playerSheet(id) {
   if ($('#sheet').classList.contains('open')) $('#sheet-body').innerHTML = body(s?.history || []);
 }
 
+function transferPicker(outId, query = '') {
+  const ctx = state.ctx, out = ctx.players.get(outId);
+  if (!out) return;
+  const squad = myPlayers().map((x) => x.player);
+  const ids = new Set(squad.map((p) => p.id));
+  const club = new Map();
+  for (const p of squad) club.set(p.team, (club.get(p.team) || 0) + 1);
+  const budget = out.now_cost + bank();
+  const q = query.trim().toLowerCase();
+  const list = [...ctx.players.values()]
+    .filter((p) => p.element_type === out.element_type && !ids.has(p.id) && !['u', 'n'].includes(p.status))
+    .filter((p) => !q || `${p.web_name} ${p.first_name} ${p.second_name} ${tShort(p.team)} ${team(p.team)?.name}`.toLowerCase().includes(q))
+    .map((p) => ({ p, xp: M.project(p, ctx, settings.horizon).total, ok: p.now_cost <= budget && ((club.get(p.team) || 0) - (p.team === out.team ? 1 : 0)) < 3 }))
+    .sort((a, b) => b.ok - a.ok || b.xp - a.xp)
+    .slice(0, 40);
+  const rows = list.map(({ p, xp, ok }) => `<li class="${ok ? '' : 'dim'}"><button class="pick" ${ok ? `data-plan-in="${p.id}" data-out="${outId}"` : 'disabled'}>
+      <span><b>${esc(p.web_name)}</b> ${statusDot(p)}<div class="sub">${tShort(p.team)} · £${M.price(p)}m · ${p.selected_by_percent}% · ${ok ? `${fmt(xp)} xP` : p.now_cost > budget ? 'too expensive' : '3 from this club already'}</div></span>
+      <span class="fxrow">${fxRun(p.team, 3)}</span></button></li>`).join('');
+  const html = `<h2>Replace ${esc(out.web_name)}</h2>
+    <p class="muted small">${M.POS[out.element_type]} · budget £${fmt(budget / 10)}m (their price + bank). Your real selling price may be a little lower.</p>
+    <input id="picker-search" data-out="${outId}" placeholder="Search name or club" value="${esc(query)}" autocomplete="off">
+    <ul class="picker">${rows || '<li class="muted">No players match.</li>'}</ul>`;
+  if ($('#sheet').classList.contains('open') && $('#picker-search')) {
+    $('.picker').outerHTML = `<ul class="picker">${rows || '<li class="muted">No players match.</li>'}</ul>`;
+  } else {
+    openSheet(html);
+    setTimeout(() => $('#picker-search')?.focus(), 50);
+  }
+}
+
 function openSheet(html) {
   $('#sheet-body').innerHTML = html;
   $('#sheet').classList.add('open');
@@ -882,10 +991,11 @@ const teamColor = (id) => COLORS[tShort(id)] || '#5b4b8a';
 
 // ---------- events ----------
 document.addEventListener('click', async (ev) => {
-  const t = ev.target.closest('[data-player],[data-action],[data-rival],[data-creator],[data-ask],.sheet-close,#sheet');
+  const t = ev.target.closest('[data-plan-in],[data-player],[data-action],[data-rival],[data-creator],[data-ask],.sheet-close,#sheet');
   if (!t) return;
   if (t.id === 'sheet') { if (ev.target === t) closeSheet(); return; }
   if (t.classList.contains('sheet-close')) return closeSheet();
+  if (t.dataset.planIn) return planTransfer(+t.dataset.out, +t.dataset.planIn);
   if (t.dataset.player) { ev.preventDefault(); return playerSheet(+t.dataset.player); }
   if (t.dataset.rival) return rivalSheet(+t.dataset.rival);
   if (t.dataset.creator) return creatorSheet(+t.dataset.creator);
@@ -897,6 +1007,16 @@ document.addEventListener('click', async (ev) => {
     await loadLeague(+t.dataset.id, true).catch((e) => toast(e.message));
     return render();
   }
+  if (a === 'plan-out') return transferPicker(+t.dataset.id);
+  if (a === 'plan-cap' || a === 'plan-vice') {
+    const p = getPlan(), id = +t.dataset.id;
+    if (a === 'plan-cap') { if (p.vice === id) p.vice = null; p.captain = id; } else { if (p.captain === id) p.captain = null; p.vice = id; }
+    closeSheet();
+    savePlan(p);
+    return toast(`${state.ctx.players.get(id)?.web_name} is ${a === 'plan-cap' ? 'captain' : 'vice-captain'}`);
+  }
+  if (a === 'plan-undo') { const p = getPlan(); p.moves.splice(+t.dataset.i, 1); return savePlan(p); }
+  if (a === 'plan-reset') { if (confirm('Clear your planned transfers and captain?')) savePlan(emptyPlan()); return; }
   if (a === 'coach-new') {
     if (coach.busy) return;
     coach.messages = [];
@@ -985,6 +1105,12 @@ document.addEventListener('change', async (ev) => {
 });
 
 window.addEventListener('hashchange', render);
+document.addEventListener('input', (ev) => {
+  if (ev.target.id === 'picker-search') transferPicker(+ev.target.dataset.out, ev.target.value);
+});
+// Show unexpected errors instead of failing silently.
+window.addEventListener('error', (e) => toast(`Something went wrong: ${e.message}`));
+window.addEventListener('unhandledrejection', (e) => toast(`Something went wrong: ${e.reason?.message || e.reason}`));
 document.addEventListener('keydown', (ev) => {
   if (ev.target.matches?.('#coach-form textarea') && ev.key === 'Enter' && !ev.shiftKey) {
     ev.preventDefault();

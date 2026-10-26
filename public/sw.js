@@ -1,5 +1,5 @@
 // Offline shell: cache the app files; API data is cached by the app itself.
-const CACHE = 'gaffer-v4';
+const CACHE = 'gaffer-v5';
 const SHELL = ['./', 'index.html', 'styles.css', 'js/app.js', 'js/api.js', 'js/model.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {

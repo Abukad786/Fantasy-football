@@ -238,3 +238,17 @@ details summary { cursor: pointer; color: var(--info); margin-bottom: 6px; }
 .ask textarea { flex: 1; font: inherit; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--text); resize: none; }
 .steps { padding-left: 20px; } .steps li { margin-bottom: 6px; }
 #coach-status { min-height: 18px; }
+
+.plan-on { border-color: var(--brand-2); }
+.plan-moves { list-style: none; padding: 0; margin: 0 0 6px; }
+.plan-moves li { display: flex; align-items: center; gap: 6px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.plan-moves .x { margin-left: auto; background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 14px; padding: 2px 6px; }
+.mini { margin-top: 4px; font: inherit; font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--brand-2); background: transparent; color: var(--text); cursor: pointer; }
+.sheet-actions { margin: 10px 0 4px; }
+#picker-search { width: 100%; margin: 6px 0 8px; }
+.picker { list-style: none; padding: 0; margin: 0; }
+.picker li { border-bottom: 1px solid var(--line); }
+.picker .pick { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 8px; background: none; border: 0; padding: 8px 2px; text-align: left; font: inherit; color: var(--text); cursor: pointer; }
+.picker .pick:hover { background: var(--surface-2); }
+.picker li.dim { opacity: .45; }
+.picker .pick:disabled { cursor: default; }

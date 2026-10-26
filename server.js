@@ -267,6 +267,29 @@ async function handleCoach(req, res) {
   res.end();
 }
 
+// ---------- Android app download ----------
+// Serves the latest APK from GitHub Releases under our own address with proper download headers.
+const APK_URL = process.env.APK_URL || 'https://github.com/Abukad786/Fantasy-football/releases/latest/download/gaffer.apk';
+let apkCache = null; // { buf, expires }
+async function handleApk(res) {
+  try {
+    if (!apkCache || apkCache.expires < Date.now()) {
+      const r = await fetch(APK_URL, { redirect: 'follow', signal: AbortSignal.timeout(20000) });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      apkCache = { buf: Buffer.from(await r.arrayBuffer()), expires: Date.now() + 3600e3 };
+    }
+    res.writeHead(200, {
+      'Content-Type': 'application/vnd.android.package-archive',
+      'Content-Length': apkCache.buf.length,
+      'Content-Disposition': 'attachment; filename="gaffer.apk"',
+      'Cache-Control': 'no-cache',
+    });
+    res.end(apkCache.buf);
+  } catch (err) {
+    send(res, 502, `Couldn't fetch the app file (${err.message}). Try ${APK_URL}`);
+  }
+}
+
 // ---------- static files ----------
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -289,7 +312,8 @@ async function serveStatic(req, res, pathname) {
     const ext = path.extname(file);
     res.writeHead(200, {
       'Content-Type': MIME[ext] || 'application/octet-stream',
-      'Cache-Control': ext === '.html' || file.endsWith('sw.js') ? 'no-cache' : 'public, max-age=3600',
+      // Always check for a newer version so updates show up straight away (files are small).
+      'Cache-Control': ext === '.png' || ext === '.svg' ? 'public, max-age=86400' : 'no-cache',
     });
     res.end(data);
   } catch {
@@ -317,6 +341,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/news') {
       return send(res, 200, JSON.stringify(await getNews()), 'application/json');
     }
+    if (url.pathname === '/gaffer.apk') return handleApk(res);
     if (url.pathname === '/api/coach') return handleCoach(req, res);
     if (url.pathname === '/api/coach/status') {
       return send(res, 200, JSON.stringify({ configured: !!process.env.ANTHROPIC_API_KEY, passcode: !!process.env.COACH_PASSCODE }), 'application/json');
