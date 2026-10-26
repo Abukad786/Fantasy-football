@@ -6,6 +6,7 @@ A phone-first web app for Fantasy Premier League that installs on Android like a
 - **My team** – your squad on a pitch with next fixture and projected points, captain picks (with % of rivals captaining each), transfer ideas, and a stats table (xGI/90, ownership, rival ownership, fixture run).
 - **Leagues** – for each league you track: a game plan in plain English, a table comparing you with the rivals above and just below you (gap, live GW points, projected points, shared players, captain, chips left, team value, hits), the players they own that you don't ("threats"), and your differentials. Tap a rival to see their squad, transfers and chips.
 - **Insights** – top projected players by position, a fixture ticker, "due a goal" (xG above goals), players running hot, xGI per 90 leaders, differentials, value picks, most transferred in/out and price changes.
+- **AI Coach** – chat with an FPL coach powered by Claude (Opus 5.5). It sees your squad, bank, chips, fixtures, injury news, mini-league rivals and creators' teams, and can search the web for the latest press-conference news. Ask about captains, transfers, hits, chips or anything else.
 - **Creators** – follow FPL YouTubers (Let's Talk FPL and FPL Harry are set up; add more): their latest videos, their FPL squad, captain, transfers and chips, and the players they own that you don't. Add each creator's FPL team ID or team link in the app.
 - **News** – injury and availability news for your players and your rivals' players, plus headlines from Fantasy Football Scout, BBC Sport, The Guardian and Sky Sports (headline + link to the original).
 - **Updates** – "since you last checked": rank changes, rival transfers and chips played. Optional notifications when the app is opened, plus a 24-hour deadline reminder.
@@ -23,9 +24,10 @@ For each upcoming match: chance of playing (FPL injury flags plus start rate) ×
 
 ## Run it
 
-Needs Node 18 or newer. No packages to install.
+Needs Node 18 or newer.
 
 ```bash
+npm install
 npm start            # http://localhost:3000
 ```
 
@@ -50,6 +52,14 @@ The signing key (`android/app/gaffer.keystore`) is committed so updates install 
 
 **Without the APK:** open your hosted URL in Chrome → **⋮ → Install app**.
 
+### Turning on the AI Coach
+1. Create an API key at https://console.anthropic.com/settings/keys and add some credit under Billing.
+2. In Render: your **gaffer** service → **Environment** → add `ANTHROPIC_API_KEY` = your key.
+3. Add `COACH_PASSCODE` = any word. The app asks for it once, so strangers who find your URL can't spend your credit.
+4. Save; Render restarts the app.
+
+Each question costs roughly 2–5p (the coach is sent a snapshot of your data each time, and a web search adds a little). `COACH_PER_HOUR` (default 40) caps questions per hour.
+
 ## Settings you can change
 - Rivals above / below you to compare (default 5 above, 3 below)
 - How many gameweeks to plan ahead (default 5)
@@ -59,6 +69,7 @@ The signing key (`android/app/gaffer.keystore`) is committed so updates install 
 ```bash
 npm test                          # analytics unit tests
 npm run mock & npm run dev:mock   # full app against a fake FPL API; test team ID 1005
+node test/mock-claude.js          # stand-in Claude API; start the server with ANTHROPIC_BASE_URL=http://localhost:4200 ANTHROPIC_API_KEY=test
 ```
 
 ## Notes

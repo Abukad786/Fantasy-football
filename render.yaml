@@ -3,6 +3,11 @@ services:
     name: gaffer
     runtime: node
     plan: free
-    buildCommand: "true"
+    buildCommand: npm install --omit=dev
     startCommand: node server.js
     healthCheckPath: /api/health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: COACH_PASSCODE
+        sync: false

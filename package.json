@@ -4,11 +4,16 @@
   "description": "FPL news, Opta-based insights and mini-league rival comparison. Installable PWA.",
   "type": "module",
   "private": true,
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node server.js",
     "mock": "node test/mock-fpl.js",
     "dev:mock": "FPL_BASE=http://localhost:4100/api NEWS_FEEDS='[{\"source\":\"Test feed\",\"url\":\"http://localhost:4100/rss\",\"fpl\":true}]' node server.js",
     "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.3.0"
   }
 }

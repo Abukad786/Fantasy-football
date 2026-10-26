@@ -1,6 +1,6 @@
 // Gaffer server: serves the app and relays the official FPL API + news feeds.
 // Browsers can't call fantasy.premierleague.com directly (CORS), so this does it for them.
-// Zero dependencies — needs Node 18+.
+// Needs Node 18+. The only dependency is the Anthropic SDK, used by the AI coach.
 
 import http from 'node:http';
 import fs from 'node:fs/promises';
@@ -153,6 +153,115 @@ async function getYouTube(params) {
   return { ok: true, channel: id, items: parseFeed(r.body, { source: handle || id }).slice(0, 10) };
 }
 
+// ---------- AI coach ----------
+// Needs ANTHROPIC_API_KEY. Optional COACH_PASSCODE stops strangers using your API credit.
+const COACH_PROMPT = `You are Gaffer's FPL coach: an expert Fantasy Premier League adviser talking to one manager about their own team.
+
+You get a snapshot of their data from the official FPL API: squad, prices, bank, chips, fixtures, injury news, their mini-leagues and the rivals around them, and the FPL creators they follow. FPL's expected stats (xG, xA, xGC, defensive contributions) come from Opta. "xP" is the app's projected points (per-90 rates x likely minutes x fixture difficulty); treat it as one input, not gospel.
+
+How to coach:
+- Give a clear recommendation first (who to bring in, who to captain, whether to take a hit, when to use a chip), then the short reasoning, then the main alternative.
+- Name players, prices and fixtures. Respect the budget (bank + the outgoing player's price; real selling prices can be £0.1-0.2m lower), the 3-per-club rule and squad positions.
+- Think about their mini-leagues, not just raw points: when chasing, differentials and different captains gain ground; when leading, covering what rivals own protects the lead. Use rival ownership in the data.
+- A hit costs 4 points; only recommend one when the projected gain clearly beats it over the next few gameweeks.
+- The FPL API doesn't say how many free transfers they have. Ask if it matters to the answer.
+- For fresh news (press conferences, injuries, lineups, price changes), use web search, and say when information may have changed since the snapshot.
+- Don't invent stats. If something isn't in the data and you can't find it, say so.
+- British English. Be concise and friendly, like a knowledgeable mate. Use short paragraphs or bullets; no tables wider than 4 columns.`;
+
+let anthropic = null;
+async function coachClient() {
+  if (!process.env.ANTHROPIC_API_KEY) return null;
+  if (!anthropic) {
+    const { default: Anthropic } = await import('@anthropic-ai/sdk');
+    anthropic = new Anthropic();
+  }
+  return anthropic;
+}
+
+const coachHits = new Map(); // ip -> timestamps
+function coachRateLimited(ip) {
+  const now = Date.now();
+  const list = (coachHits.get(ip) || []).filter((t) => now - t < 3600e3);
+  list.push(now);
+  coachHits.set(ip, list);
+  return list.length > Number(process.env.COACH_PER_HOUR || 40);
+}
+
+function readBody(req, limit = 300_000) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) { reject(new Error('too_large')); req.destroy(); }
+      else chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+async function handleCoach(req, res) {
+  const json = (status, obj) => send(res, status, JSON.stringify(obj), 'application/json');
+  if (req.method !== 'POST') return json(405, { error: 'method_not_allowed' });
+  let body;
+  try { body = JSON.parse(await readBody(req)); } catch { return json(400, { error: 'bad_request' }); }
+  if (process.env.COACH_PASSCODE && body.passcode !== process.env.COACH_PASSCODE) return json(401, { error: 'passcode_required' });
+  const client = await coachClient();
+  if (!client) return json(503, { error: 'not_configured' });
+  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  if (coachRateLimited(ip)) return json(429, { error: 'rate_limited' });
+
+  // Clean the conversation: alternating text turns, ending with the user.
+  const messages = (Array.isArray(body.messages) ? body.messages : [])
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
+    .slice(-20)
+    .map((m) => ({ role: m.role, content: m.content.slice(0, 8000) }));
+  while (messages.length && messages[0].role !== 'user') messages.shift();
+  if (!messages.length || messages.at(-1).role !== 'user') return json(400, { error: 'bad_request' });
+  const context = String(body.context || '').slice(0, 60_000);
+
+  res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+  const emit = (o) => res.write(JSON.stringify(o) + '\n');
+  let closed = false;
+  res.on('close', () => { closed = true; });
+
+  try {
+    let convo = messages;
+    for (let turn = 0; turn < 4 && !closed; turn++) {
+      const stream = client.beta.messages.stream({
+        model: 'claude-opus-5-5',
+        max_tokens: 16000,
+        betas: ['server-side-fallback-2026-07-01'],
+        fallbacks: 'default',
+        output_config: { effort: 'medium' },
+        system: [
+          { type: 'text', text: COACH_PROMPT, cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: `Today is ${new Date().toUTCString()}.\n\n<fpl_snapshot>\n${context}\n</fpl_snapshot>` },
+        ],
+        tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 3, user_location: { type: 'approximate', country: 'GB' } }],
+        messages: convo,
+      });
+      res.on('close', () => { try { stream.abort(); } catch {} });
+      for await (const ev of stream) {
+        if (ev.type === 'content_block_start' && ev.content_block.type === 'server_tool_use') emit({ t: 'status', v: 'Checking the latest news…' });
+        if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') emit({ t: 'text', v: ev.delta.text });
+      }
+      const final = await stream.finalMessage();
+      if (final.stop_reason === 'refusal') { emit({ t: 'error', v: "The coach couldn't answer that one. Try rephrasing." }); break; }
+      if (final.stop_reason === 'pause_turn') { convo = [...convo, { role: 'assistant', content: final.content }]; continue; }
+      if (final.stop_reason === 'max_tokens') emit({ t: 'text', v: '\n\n_(Answer cut short. Ask me to continue.)_' });
+      break;
+    }
+    emit({ t: 'done' });
+  } catch (err) {
+    console.error('coach error', err?.status, err?.message);
+    emit({ t: 'error', v: err?.status === 429 ? 'The coach is busy. Try again in a minute.' : err?.status === 401 ? 'The API key on the server is invalid.' : 'The coach hit an error. Try again.' });
+  }
+  res.end();
+}
+
 // ---------- static files ----------
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -202,6 +311,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/news') {
       return send(res, 200, JSON.stringify(await getNews()), 'application/json');
+    }
+    if (url.pathname === '/api/coach') return handleCoach(req, res);
+    if (url.pathname === '/api/coach/status') {
+      return send(res, 200, JSON.stringify({ configured: !!process.env.ANTHROPIC_API_KEY, passcode: !!process.env.COACH_PASSCODE }), 'application/json');
     }
     if (url.pathname === '/api/youtube') {
       return send(res, 200, JSON.stringify(await getYouTube(url.searchParams)), 'application/json');

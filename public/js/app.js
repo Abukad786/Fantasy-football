@@ -191,7 +191,7 @@ function deadlineReminder() {
 }
 
 // ---------- views ----------
-const views = { creators: viewCreators, home: viewHome, team: viewTeam, leagues: viewLeagues, insights: viewInsights, news: viewNews, settings: viewSettings };
+const views = { coach: viewCoach, creators: viewCreators, home: viewHome, team: viewTeam, leagues: viewLeagues, insights: viewInsights, news: viewNews, settings: viewSettings };
 let currentLeague = null;
 
 async function render() {
@@ -484,6 +484,195 @@ async function viewNews() {
 }
 
 
+// ---------- AI coach ----------
+const COACH_KEY = 'gaffer:coach';
+const coach = { messages: readLS(COACH_KEY, []), busy: false, status: null };
+const saveCoach = () => writeLS(COACH_KEY, coach.messages.slice(-30));
+
+// Everything the coach needs to know, as compact text.
+function coachContext() {
+  const ctx = state.ctx, H = settings.horizon;
+  const L = [];
+  const p2 = (p) => {
+    const pr = M.project(p, ctx, H);
+    const fx = M.fixtureRun(p.team, ctx, H).map((g) => g.fxs.length ? g.fxs.map((f) => `${tShort(f.opp)}${f.home ? '(H)' : '(A)'}${f.diff}`).join('+') : 'blank').join(' ');
+    return `${p.web_name} [${M.POS[p.element_type]} ${tShort(p.team)} £${M.price(p)}m] form ${p.form}, pts ${p.total_points}, mins ${p.minutes}, G ${p.goals_scored} xG ${(+p.expected_goals).toFixed(1)}, A ${p.assists} xA ${(+p.expected_assists).toFixed(1)}, xGI/90 ${M.per90(p, 'expected_goal_involvements').toFixed(2)}, owned ${p.selected_by_percent}%, xP next ${pr.next.toFixed(1)} / ${H}GW ${pr.total.toFixed(1)}${p.news ? `, NEWS: ${p.news}` : ''} | fixtures: ${fx}`;
+  };
+  L.push(`Current GW: ${ctx.current?.id ?? '-'}${ctx.current && !ctx.current.finished ? ' (in progress)' : ''}. Next deadline: ${ctx.next ? `${ctx.next.name} ${new Date(ctx.next.deadline_time).toUTCString()}` : 'none'}. Fixture difficulty 1 (easy) to 5 (hard).`);
+  const e = state.entry;
+  if (e) {
+    const last = state.history?.current?.at(-1);
+    L.push(`\n## Manager: ${e.name}. Total ${e.summary_overall_points} pts, overall rank ${e.summary_overall_rank}, GW pts ${e.summary_event_points}. Team value £${((last?.value ?? 0) / 10).toFixed(1)}m, bank £${(bank() / 10).toFixed(1)}m.`);
+    const ch = M.chipsStatus(state.history, ctx);
+    L.push(`Chips used: ${ch.used.map((c) => `${M.chipLabel(c.name)} GW${c.event}`).join(', ') || 'none'}. Chips available now: ${ch.available.map((c) => `${M.chipLabel(c.name)} (until GW${c.until})`).join(', ') || 'none'}.`);
+    const recent = (state.history?.current || []).slice(-5).map((g) => `GW${g.event}: ${g.points}pts${g.event_transfers_cost ? ` (-${g.event_transfers_cost} hit)` : ''}, bench ${g.points_on_bench}`).join('; ');
+    if (recent) L.push(`Recent GWs: ${recent}.`);
+  }
+  const sq = myPlayers();
+  if (sq.length) {
+    L.push(`\n## Squad (GW${ctx.current?.id}${state.picks?.active_chip ? `, chip active: ${M.chipLabel(state.picks.active_chip)}` : ''})`);
+    for (const x of sq) L.push(`- ${x.position > 11 ? 'BENCH ' : ''}${x.is_captain ? '(C) ' : x.is_vice_captain ? '(VC) ' : ''}${p2(x.player)}`);
+    const ideas = M.transferIdeas(sq.map((x) => x.player), bank(), ctx, { horizon: H, limit: 5 });
+    if (ideas.points.length) L.push(`App's top transfer ideas (xP gain over ${H} GWs): ${ideas.points.map((i) => `${i.out.web_name} -> ${i.in.web_name} £${M.price(i.in)}m (+${i.gain.toFixed(1)})`).join('; ')}`);
+  }
+  for (const id of settings.leagues) {
+    const d = state.leagues.get(id);
+    if (!d) continue;
+    L.push(`\n## Mini-league: ${d.league.name} (${d.rows.length}${d.rows.length >= 50 ? '+' : ''} teams)`);
+    for (const r of [...d.cmp.rows].sort((a, b) => (a.rank ?? 1e9) - (b.rank ?? 1e9))) {
+      L.push(`- ${r.rank ?? '?'}. ${r.isMe ? 'YOU' : r.name}: ${r.total} pts (${r.isMe ? '-' : (r.gap > 0 ? '+' : '') + r.gap + ' vs you'}), GW ${r.eventTotal ?? '-'}, captain ${r.captain?.web_name ?? '-'}, chips left ${r.chips.available.map((c) => chipShort(c.name)).join('/') || 'none'}, value £${r.value ?? '-'}m, xP ${H}GW ${r.proj?.toFixed(0) ?? '-'}${r.isMe ? '' : `, shares ${r.shared}/15`}`);
+    }
+    if (d.cmp.threats.length) L.push(`Rival-owned players you lack: ${d.cmp.threats.map((t) => `${t.p.web_name} ${Math.round(t.own * 100)}%`).join(', ')}`);
+    L.push(`Rival ownership of your players: ${d.cmp.edges.map((t) => `${t.p.web_name} ${Math.round(t.own * 100)}%`).join(', ')}`);
+  }
+  const cr = state.creators;
+  if (cr?.cmp) {
+    L.push(`\n## FPL creators followed`);
+    for (const c of cr.list.filter((c) => c.picks)) {
+      const cap = c.picks.picks.find((p) => p.is_captain);
+      const tr = (c.transfers || []).filter((t) => t.event >= (ctx.current?.id || 0) - 1).map((t) => `${ctx.players.get(t.element_out)?.web_name}->${ctx.players.get(t.element_in)?.web_name} (GW${t.event})`);
+      L.push(`- ${c.player}: rank ${c.overallRank ?? '-'}, captain ${ctx.players.get(cap?.element)?.web_name ?? '-'}, squad: ${c.picks.picks.map((p) => ctx.players.get(p.element)?.web_name).join(', ')}${tr.length ? `; recent transfers ${tr.join(', ')}` : ''}`);
+    }
+  }
+  if (cr?.list?.some((c) => c.videos?.items?.length)) {
+    L.push(`Latest creator videos: ${cr.list.flatMap((c) => (c.videos?.items || []).slice(0, 2).map((v) => `${c.player}: "${v.title}"`)).join('; ')}`);
+  }
+  const I = M.insightLists(ctx, H);
+  L.push(`\n## Best projected players (next ${H} GWs), for transfer targets`);
+  for (const t of [1, 2, 3, 4]) L.push(`${M.POS[t]}: ${I.byPos[t].slice(0, 8).map((x) => `${x.p.web_name} ${tShort(x.p.team)} £${M.price(x.p)}m xP ${x.proj.toFixed(1)} own ${x.p.selected_by_percent}%`).join('; ')}`);
+  L.push(`Differentials (<10% owned): ${I.diffs.slice(0, 8).map((x) => `${x.p.web_name} £${M.price(x.p)}m ${x.proj.toFixed(1)}`).join('; ')}`);
+  L.push(`Easiest fixtures: ${I.teamsByEase.slice(0, 6).map(({ t }) => t.short_name).join(', ')}. Hardest: ${I.teamsByEase.slice(-5).map(({ t }) => t.short_name).join(', ')}.`);
+  return L.join('\n');
+}
+
+// Small, safe markdown -> HTML (escape first, then format).
+function md(text) {
+  const inline = (s) => esc(s)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/(^|[\s(])[*_]([^*_\n]+)[*_](?=[\s).,!?:;]|$)/g, '$1<i>$2</i>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+  const out = [];
+  let list = null;
+  const close = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const raw of text.split('\n')) {
+    const line = raw.trimEnd();
+    let m;
+    if ((m = line.match(/^\s*[-*•]\s+(.*)/))) { if (list !== 'ul') { close(); out.push('<ul>'); list = 'ul'; } out.push(`<li>${inline(m[1])}</li>`); }
+    else if ((m = line.match(/^\s*\d+[.)]\s+(.*)/))) { if (list !== 'ol') { close(); out.push('<ol>'); list = 'ol'; } out.push(`<li>${inline(m[1])}</li>`); }
+    else if ((m = line.match(/^#{1,4}\s+(.*)/))) { close(); out.push(`<h4>${inline(m[1])}</h4>`); }
+    else if (!line.trim()) { close(); }
+    else { close(); out.push(`<p>${inline(line)}</p>`); }
+  }
+  close();
+  return out.join('');
+}
+
+const COACH_SUGGESTIONS = [
+  'Who should I captain this week?',
+  'What transfer should I make this week?',
+  'Is a -4 hit worth it this week?',
+  'How do I catch the leader in my mini-league?',
+  'When should I play my chips?',
+  'Which creator picks should I copy?',
+];
+
+function coachMsgHtml(m, i) {
+  return `<div class="msg ${m.role}" data-i="${i}">${m.role === 'user' ? `<p>${esc(m.content)}</p>` : md(m.content) || '<p class="muted">…</p>'}</div>`;
+}
+
+let coachStatus = null;
+async function viewCoach() {
+  if (!coachStatus) coachStatus = await fetch('/api/coach/status').then((r) => r.json()).catch(() => ({ configured: false }));
+  if (!coachStatus.configured) {
+    return `<h1>AI Coach</h1>${card('One-time setup', `<p>The coach uses Claude and needs an Anthropic API key on your server.</p>
+      <ol class="steps"><li>Get a key at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> (add a little credit under Billing).</li>
+      <li>In Render, open your <b>gaffer</b> service → <b>Environment</b> → add <code>ANTHROPIC_API_KEY</code> with your key.</li>
+      <li>Also add <code>COACH_PASSCODE</code> with any word you like, so only you can use your credit.</li>
+      <li>Save. Render restarts the app; then come back here.</li></ol>`)}`;
+  }
+  const msgs = coach.messages;
+  return `<div class="coach">
+    <div class="row-between"><h1>AI Coach</h1>${msgs.length ? '<button class="btn ghost small-btn" data-action="coach-new">New chat</button>' : ''}</div>
+    <p class="muted small">Ask anything about your team. The coach sees your squad, bank, chips, fixtures, leagues, rivals and creators, and can check the latest news.</p>
+    ${coachStatus.passcode && !settings.coachCode ? card('Passcode', `<form id="coach-code" class="inline"><input name="code" placeholder="Coach passcode" required><button class="btn">Save</button></form>`) : ''}
+    <div id="chat" class="chat">${msgs.map(coachMsgHtml).join('')}${coach.busy ? '' : ''}</div>
+    <div id="coach-status" class="muted small">${coach.status ? esc(coach.status) : ''}</div>
+    ${msgs.length ? '' : `<div class="pills">${COACH_SUGGESTIONS.map((q) => `<button class="pill" data-ask="${esc(q)}">${esc(q)}</button>`).join('')}</div>`}
+    <form id="coach-form" class="ask"><textarea name="q" rows="2" placeholder="e.g. Should I sell Salah for Palmer?" ${coach.busy ? 'disabled' : ''}></textarea><button class="btn" ${coach.busy ? 'disabled' : ''}>Ask</button></form>
+    <p class="note">AI advice can be wrong. Check prices and team news before the deadline.</p>
+  </div>`;
+}
+
+// Drop failed exchanges (an error note and the question that caused it) from what the coach sees.
+function coachHistory(list) {
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].role === 'user' && list[i + 1]?.error) { i++; continue; }
+    if (!list[i].error) out.push({ role: list[i].role, content: list[i].content });
+  }
+  return out;
+}
+
+async function askCoach(q) {
+  q = q.trim();
+  if (!q || coach.busy) return;
+  coach.messages.push({ role: 'user', content: q });
+  const answer = { role: 'assistant', content: '' };
+  coach.messages.push(answer);
+  coach.busy = true;
+  coach.status = 'Thinking…';
+  saveCoach();
+  await render();
+  const chat = $('#chat');
+  const el = () => chat?.querySelector('.msg.assistant:last-child');
+  const scroll = () => el()?.scrollIntoView({ block: 'end' });
+  scroll();
+  try {
+    if (settings.teamId && !state.creators) await loadCreators().catch(() => {});
+    const res = await fetch('/api/coach', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: coachHistory(coach.messages.slice(0, -1)), context: coachContext(), passcode: settings.coachCode || undefined }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if (err.error === 'passcode_required') { settings.coachCode = ''; saveSettings(); throw new Error('Wrong or missing passcode. Enter it above.'); }
+      if (err.error === 'rate_limited') throw new Error("You've asked a lot this hour. Try again later.");
+      if (err.error === 'not_configured') { coachStatus = null; throw new Error('The coach is not set up on the server yet.'); }
+      throw new Error('The coach is unavailable right now.');
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        const ev = JSON.parse(line);
+        if (ev.t === 'text') { answer.content += ev.v; coach.status = null; }
+        else if (ev.t === 'status') coach.status = ev.v;
+        else if (ev.t === 'error') { if (!answer.content.trim()) answer.error = true; answer.content += (answer.content ? '\n\n' : '') + `_${ev.v}_`; }
+        const node = el();
+        if (node) node.innerHTML = md(answer.content) || '<p class="muted">…</p>';
+        const st = $('#coach-status'); if (st) st.textContent = coach.status || '';
+      }
+    }
+  } catch (err) {
+    if (!answer.content.trim()) answer.error = true;
+    answer.content += (answer.content ? '\n\n' : '') + `_${err.message}_`;
+  }
+  if (!answer.content.trim()) { answer.content = '_No answer came back. Try again._'; answer.error = true; }
+  coach.busy = false;
+  coach.status = null;
+  saveCoach();
+  if ((location.hash.slice(1) || '').startsWith('coach')) { await render(); scroll(); }
+}
+
 // ---------- creators ----------
 function parseFplId(v) {
   const m = String(v || '').match(/entry\/(\d+)/) || String(v || '').match(/^\s*(\d{1,9})\s*$/);
@@ -676,18 +865,25 @@ const teamColor = (id) => COLORS[tShort(id)] || '#5b4b8a';
 
 // ---------- events ----------
 document.addEventListener('click', async (ev) => {
-  const t = ev.target.closest('[data-player],[data-action],[data-rival],[data-creator],.sheet-close,#sheet');
+  const t = ev.target.closest('[data-player],[data-action],[data-rival],[data-creator],[data-ask],.sheet-close,#sheet');
   if (!t) return;
   if (t.id === 'sheet') { if (ev.target === t) closeSheet(); return; }
   if (t.classList.contains('sheet-close')) return closeSheet();
   if (t.dataset.player) { ev.preventDefault(); return playerSheet(+t.dataset.player); }
   if (t.dataset.rival) return rivalSheet(+t.dataset.rival);
   if (t.dataset.creator) return creatorSheet(+t.dataset.creator);
+  if (t.dataset.ask) return askCoach(t.dataset.ask);
   const a = t.dataset.action;
   if (a === 'refresh') return refreshAll(true);
   if (a === 'reload-league') {
     $('#main').innerHTML = `<div class="loading">Refreshing league…</div>`;
     await loadLeague(+t.dataset.id, true).catch((e) => toast(e.message));
+    return render();
+  }
+  if (a === 'coach-new') {
+    if (coach.busy) return;
+    coach.messages = [];
+    saveCoach();
     return render();
   }
   if (a === 'add-creator' || a === 'remove-creator') {
@@ -727,6 +923,15 @@ document.addEventListener('submit', async (ev) => {
     toast(`Found ${entry.name}`);
     render();
   }
+  if (f.id === 'coach-form') {
+    const q = new FormData(f).get('q');
+    return askCoach(String(q || ''));
+  }
+  if (f.id === 'coach-code') {
+    settings.coachCode = String(new FormData(f).get('code') || '').trim();
+    saveSettings();
+    return render();
+  }
   if (f.id === 'creators-form') {
     saveCreatorsForm(true);
     state.creators = null;
@@ -762,6 +967,12 @@ document.addEventListener('change', async (ev) => {
 });
 
 window.addEventListener('hashchange', render);
+document.addEventListener('keydown', (ev) => {
+  if (ev.target.matches?.('#coach-form textarea') && ev.key === 'Enter' && !ev.shiftKey) {
+    ev.preventDefault();
+    ev.target.form.requestSubmit();
+  }
+});
 
 let deferredInstall = null;
 window.addEventListener('beforeinstallprompt', (e) => {
