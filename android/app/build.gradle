@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.gaffer.fpl'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.gaffer.fpl'
+        minSdk 24
+        targetSdk 35
+        // CI passes -PversionCode=<run number> so every build installs as an update.
+        versionCode (project.findProperty('versionCode') ?: '1') as int
+        versionName "1.0.${versionCode}"
+    }
+
+    signingConfigs {
+        // A fixed key so new versions install over old ones. Personal-use app only.
+        gaffer {
+            storeFile file('gaffer.keystore')
+            storePassword 'gaffer-fpl'
+            keyAlias 'gaffer'
+            keyPassword 'gaffer-fpl'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.gaffer
+        }
+        debug {
+            signingConfig signingConfigs.gaffer
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

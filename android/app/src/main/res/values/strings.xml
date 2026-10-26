@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Gaffer</string>
+    <!-- Your hosted Gaffer address. Change this if you move the server. -->
+    <string name="app_url">https://gaffer-sl1t.onrender.com/</string>
+</resources>

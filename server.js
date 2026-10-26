@@ -49,7 +49,9 @@ async function cachedFetch(url, ttl, parse = 'json') {
       const res = await fetch(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Gaffer FPL companion)',
-          Accept: parse === 'json' ? 'application/json' : 'application/rss+xml, application/xml, text/xml',
+          Accept: parse === 'json' ? 'application/json' : parse === 'html' ? 'text/html' : 'application/rss+xml, application/xml, text/xml',
+          'Accept-Language': 'en-GB,en;q=0.9',
+          ...(parse === 'html' ? { Cookie: 'CONSENT=YES+1; SOCS=CAI' } : {}),
         },
         signal: AbortSignal.timeout(15000),
       });
@@ -129,6 +131,28 @@ async function getNews() {
   return { sources: results.map(({ source, ok, items }) => ({ source, ok, count: items.length })), items };
 }
 
+// ---------- YouTube (creators) ----------
+// Latest uploads via YouTube's public RSS feed. A handle like @LetsTalkFPL is resolved to its channel ID once.
+const channelIds = new Map();
+async function resolveChannel(handle) {
+  if (channelIds.has(handle)) return channelIds.get(handle);
+  const r = await cachedFetch(`https://www.youtube.com/${handle}`, 86400, 'html');
+  const m = r.status === 200 && (r.body.match(/"externalId":"(UC[\w-]{22})"/) || r.body.match(/channel\/(UC[\w-]{22})/) || r.body.match(/"channelId":"(UC[\w-]{22})"/));
+  const id = m ? m[1] : null;
+  if (id) channelIds.set(handle, id);
+  return id;
+}
+async function getYouTube(params) {
+  let id = params.get('channel');
+  const handle = params.get('handle');
+  if (id && !/^UC[\w-]{22}$/.test(id)) id = null;
+  if (!id && handle && /^@[\w.-]{3,40}$/.test(handle)) id = await resolveChannel(handle);
+  if (!id) return { ok: false, error: 'channel_not_found', items: [] };
+  const r = await cachedFetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${id}`, 900, 'xml');
+  if (r.status !== 200) return { ok: false, channel: id, error: 'feed_unavailable', items: [] };
+  return { ok: true, channel: id, items: parseFeed(r.body, { source: handle || id }).slice(0, 10) };
+}
+
 // ---------- static files ----------
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -178,6 +202,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/news') {
       return send(res, 200, JSON.stringify(await getNews()), 'application/json');
+    }
+    if (url.pathname === '/api/youtube') {
+      return send(res, 200, JSON.stringify(await getYouTube(url.searchParams)), 'application/json');
     }
     if (url.pathname === '/api/health') return send(res, 200, '{"ok":true}', 'application/json');
     return serveStatic(req, res, url.pathname);

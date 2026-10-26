@@ -43,6 +43,9 @@ export const fpl = {
   element: (id, o) => get(`/api/fpl/element-summary/${id}/`, o),
 };
 
+export const youtube = (c, o) =>
+  get(`/api/youtube?${c.ytId ? `channel=${encodeURIComponent(c.ytId)}` : `handle=${encodeURIComponent(c.yt || '')}`}`, { persist: true, ...o });
+
 export const news = (o) => get('/api/news', { persist: true, ...o });
 
 export function clearMemory() { mem.clear(); }

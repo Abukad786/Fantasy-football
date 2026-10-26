@@ -1,10 +1,15 @@
-import { fpl, news, pool, clearMemory } from './api.js';
+import { fpl, news, youtube, pool, clearMemory } from './api.js';
 import * as M from './model.js';
 
 // ---------- settings & state ----------
-const DEFAULTS = { teamId: null, leagues: [], above: 5, below: 3, horizon: 5, notify: false };
+// FPL team IDs for creators aren't public knowledge we can rely on, so the user fills them in.
+const DEFAULT_CREATORS = [
+  { name: "Let's Talk FPL", yt: '@LetsTalkFPL', ytId: 'UCxeOc7eFxq37yW_Nc-69deA', fplId: null },
+  { name: 'FPL Harry', yt: '@FPLHarry', ytId: null, fplId: null },
+];
+const DEFAULTS = { teamId: null, leagues: [], above: 5, below: 3, horizon: 5, notify: false, creators: DEFAULT_CREATORS };
 const settings = { ...DEFAULTS, ...readLS('gaffer:settings', {}) };
-const state = { ctx: null, entry: null, history: null, picks: null, live: null, leagues: new Map(), news: null, updates: [] };
+const state = { creators: null, ctx: null, entry: null, history: null, picks: null, live: null, leagues: new Map(), news: null, updates: [] };
 
 function readLS(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } }
 function writeLS(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
@@ -186,7 +191,7 @@ function deadlineReminder() {
 }
 
 // ---------- views ----------
-const views = { home: viewHome, team: viewTeam, leagues: viewLeagues, insights: viewInsights, news: viewNews, settings: viewSettings };
+const views = { creators: viewCreators, home: viewHome, team: viewTeam, leagues: viewLeagues, insights: viewInsights, news: viewNews, settings: viewSettings };
 let currentLeague = null;
 
 async function render() {
@@ -478,6 +483,124 @@ async function viewNews() {
   `;
 }
 
+
+// ---------- creators ----------
+function parseFplId(v) {
+  const m = String(v || '').match(/entry\/(\d+)/) || String(v || '').match(/^\s*(\d{1,9})\s*$/);
+  return m ? +m[1] : null;
+}
+function parseYt(v) {
+  v = String(v || '').trim();
+  let m = v.match(/(UC[\w-]{22})/);
+  if (m) return { ytId: m[1], yt: null };
+  m = v.match(/@([\w.-]{3,40})/) || v.match(/^([\w.-]{3,40})$/);
+  return m ? { yt: '@' + m[1], ytId: null } : { yt: null, ytId: null };
+}
+
+async function loadCreators(fresh = false) {
+  const ctx = state.ctx, gw = ctx.current?.id;
+  const list = settings.creators || [];
+  const out = await pool(list, 3, async (c) => {
+    const [videos, entry, picks, history, transfers] = await Promise.all([
+      c.yt || c.ytId ? youtube(c, { fresh }).catch(() => null) : null,
+      c.fplId ? fpl.entry(c.fplId, { fresh }).catch(() => null) : null,
+      c.fplId && gw ? fpl.picks(c.fplId, gw, { fresh }).catch(() => null) : null,
+      c.fplId ? fpl.history(c.fplId, { fresh }).catch(() => null) : null,
+      c.fplId ? fpl.transfers(c.fplId, { fresh }).catch(() => []) : [],
+    ]);
+    return { ...c, videos, entryData: entry, entry: c.fplId, rank: null, overallRank: entry?.summary_overall_rank, total: entry?.summary_overall_points ?? 0, eventTotal: picks?.entry_history?.points ?? entry?.summary_event_points, picks, history, transfers, player: c.name, name: entry?.name || c.name };
+  });
+  const withTeams = out.filter((c) => c && c.picks);
+  const me = { entry: settings.teamId, name: state.entry?.name || 'You', player: 'You', rank: null, total: state.entry?.summary_overall_points ?? 0, eventTotal: state.entry?.summary_event_points, picks: state.picks, history: state.history };
+  const cmp = withTeams.length && state.picks ? M.compareRivals(me, withTeams, ctx, { horizon: settings.horizon }) : null;
+  state.creators = { list: out.filter(Boolean), cmp, loadedAt: Date.now() };
+  if (cmp) recordSnapshot({ id: 'creators', league: { name: 'Creators' }, cmp });
+  return state.creators;
+}
+
+async function viewCreators() {
+  if (!state.creators) {
+    $('#main').innerHTML = `<div class="loading">Loading creators…</div>`;
+    await loadCreators();
+  }
+  const ctx = state.ctx, { list, cmp } = state.creators;
+  const gw = ctx.current?.id;
+  const mine = new Set((state.picks?.picks || []).map((p) => p.element));
+
+  const creatorCard = (c, i) => {
+    const vids = c.videos?.items?.slice(0, 3) || [];
+    const e = c.entryData;
+    const cap = c.picks?.picks.find((p) => p.is_captain);
+    const tIn = (c.transfers || []).filter((t) => t.event === gw);
+    const row = cmp?.rows.find((r) => r.entry === c.entry);
+    return `<section class="card">
+      <div class="row-between"><h2>${esc(c.player)}</h2>${c.yt || c.ytId ? `<a class="small" href="https://www.youtube.com/${c.ytId ? 'channel/' + esc(c.ytId) : esc(c.yt)}" target="_blank" rel="noopener">YouTube ↗</a>` : ''}</div>
+      ${e ? `<div class="cstats">
+          <div><span>Team</span><b>${esc(e.name)}</b></div>
+          <div><span>GW${gw ?? ''}</span><b>${c.eventTotal ?? '–'}</b></div>
+          <div><span>Total</span><b>${int(e.summary_overall_points)}</b></div>
+          <div><span>Overall rank</span><b>${int(e.summary_overall_rank)}</b></div>
+        </div>
+        <p class="small">Captain: <b>${cap ? esc(ctx.players.get(cap.element)?.web_name) : '–'}</b>${c.picks?.active_chip ? ` · Chip: <b>${M.chipLabel(c.picks.active_chip)}</b>` : ''}${row ? ` · Shares <b>${row.shared}/15</b> with you` : ''}
+        ${tIn.length ? `<br>GW${gw} transfers: ${tIn.map((t) => `${esc(ctx.players.get(t.element_out)?.web_name)} → <b>${esc(ctx.players.get(t.element_in)?.web_name)}</b>`).join(', ')}` : ''}</p>
+        <button class="btn ghost small-btn" data-creator="${c.entry}">See full squad</button>`
+      : c.fplId ? `<p class="muted">Couldn't load FPL team ${c.fplId}. Check the ID below.</p>` : `<p class="muted">Add their FPL team ID below to see their squad.</p>`}
+      <h3>Latest videos</h3>
+      ${vids.length ? `<ul class="news">${vids.map((v) => `<li><a href="${esc(v.link)}" target="_blank" rel="noopener">${v.image ? `<img src="${esc(v.image)}" alt="" loading="lazy">` : ''}<div><div class="ntitle">${esc(v.title)}</div><div class="sub">${timeAgo(v.published)}</div></div></a></li>`).join('')}</ul>`
+        : c.yt || c.ytId ? empty("Couldn't load videos right now.") : empty('No YouTube channel set.')}
+    </section>`;
+  };
+
+  let consensus = '';
+  if (cmp) {
+    const n = cmp.n;
+    const owned = [...cmp.own].map(([id, o]) => ({ p: ctx.players.get(id), o })).filter((x) => x.p).sort((a, b) => b.o - a.o || M.project(b.p, ctx, settings.horizon).total - M.project(a.p, ctx, settings.horizon).total);
+    const missing = owned.filter((x) => !mine.has(x.p.id)).slice(0, 10);
+    const caps = [...cmp.caps].sort((a, b) => b[1] - a[1]);
+    consensus = card(`What the creators have that you don't`, missing.length
+      ? `<table class="tbl"><thead><tr><th>Player</th><th class="num">Creators</th><th class="num">xP ${settings.horizon}GW</th><th>Next</th></tr></thead><tbody>${missing.map((x) => `<tr><td>${playerLink(x.p)} ${statusDot(x.p)} <span class="muted">£${M.price(x.p)}</span></td><td class="num">${Math.round(x.o * n)}/${n}</td><td class="num">${fmt(M.project(x.p, ctx, settings.horizon).total)}</td><td class="fxrow">${fxRun(x.p.team, 3)}</td></tr>`).join('')}</tbody></table>`
+      : empty('You own every player the creators own.'))
+      + card('Creator captains this GW', caps.length ? `<p>${caps.map(([id, c]) => `${playerLink(ctx.players.get(id))} <span class="muted">(${c}/${n})</span>`).join(' · ')}</p>` : empty('No captains yet.'));
+  }
+
+  const editor = card('Creators you follow', `
+    <form id="creators-form" class="stack">
+      ${(settings.creators || []).map((c, i) => `<fieldset class="creator-row">
+        <label>Name <input name="name" value="${esc(c.name)}" required></label>
+        <label>YouTube <input name="yt" value="${esc(c.ytId || c.yt || '')}" placeholder="@handle or channel link"></label>
+        <label>FPL team ID or link <input name="fpl" value="${c.fplId ?? ''}" placeholder="e.g. 1234567"></label>
+        <button type="button" class="btn ghost" data-action="remove-creator" data-i="${i}">Remove</button>
+      </fieldset>`).join('')}
+      <div class="inline"><button type="button" class="btn ghost" data-action="add-creator">+ Add creator</button><button class="btn" type="submit">Save</button></div>
+    </form>
+    <p class="note"><b>Finding a creator's FPL team ID:</b> creators usually show their team or link it in the video description or on X/Twitter. On the FPL site or app, open their team from a league you're both in, or from their shared link; the number after <code>/entry/</code> is the ID. You can paste the whole link here.</p>`);
+
+  return `<h1>Creators</h1>
+    <p class="muted small">Their latest videos, their FPL teams and how your squad compares.</p>
+    ${list.map(creatorCard).join('')}
+    ${consensus}
+    ${editor}`;
+}
+
+function creatorSheet(entryId) {
+  const c = state.creators?.list.find((x) => x.entry === entryId);
+  if (!c?.picks) return;
+  const ctx = state.ctx, gw = ctx.current?.id;
+  const mine = new Set((state.picks?.picks || []).map((p) => p.element));
+  const sq = M.squadFromPicks(c.picks, ctx);
+  const chips = M.chipsStatus(c.history, ctx);
+  const recent = (c.transfers || []).filter((t) => t.event >= (gw || 0) - 2).slice(0, 10);
+  openSheet(`
+    <h2>${esc(c.player)} · ${esc(c.name)}</h2>
+    <p class="muted">Overall rank ${int(c.overallRank)} · ${int(c.total)} pts</p>
+    <h3>Squad (GW${gw})</h3>
+    <ul class="squad-list">${sq.map((x) => `<li class="${mine.has(x.element) ? 'shared' : 'diff'} ${x.multiplier === 0 ? 'benched' : ''}">${playerLink(x.player)} ${x.is_captain ? '<span class="cap">C</span>' : ''} <span class="muted">${M.POS[x.player.element_type]} · ${tShort(x.player.team)} · £${M.price(x.player)}</span><span class="tag2">${mine.has(x.element) ? 'you have' : 'you don\'t'}</span></li>`).join('')}</ul>
+    <h3>Recent transfers</h3>
+    ${recent.length ? `<ul class="plain">${recent.map((t) => `<li>GW${t.event}: ${esc(ctx.players.get(t.element_out)?.web_name)} → <b>${esc(ctx.players.get(t.element_in)?.web_name)}</b></li>`).join('')}</ul>` : empty('None in the last 3 GWs.')}
+    <h3>Chips</h3>
+    <p>Used: ${chips.used.map((u) => `${M.chipLabel(u.name)} (GW${u.event})`).join(', ') || 'none'}<br>Left now: ${chips.available.map((a) => M.chipLabel(a.name)).join(', ') || 'none'}</p>`);
+}
+
 let foundLeagues = null;
 async function viewSettings() {
   const e = state.entry;
@@ -502,7 +625,7 @@ async function viewSettings() {
       <button class="btn" type="submit">Save leagues</button></form>`) : ''}
   ${card('Updates', `<label class="switch"><input type="checkbox" id="notify" ${settings.notify ? 'checked' : ''}> Notify me about rival moves and deadlines</label>
     <p class="note">Notifications are sent when Gaffer is open or reopened.</p>`)}
-  ${card('Install on Android', `<p>Open this site in Chrome, tap <b>⋮ → Add to Home screen</b> (or <b>Install app</b>). Gaffer then opens full-screen like a normal app.</p><button class="btn ghost" id="install-btn" hidden>Install now</button>`)}
+  ${card('Install on Android', `<p><b>Android app:</b> <a href="https://github.com/Abukad786/fantasy-football/releases/latest" target="_blank" rel="noopener">download gaffer.apk</a> on your phone and open it to install.</p><p class="small muted">Or open this site in Chrome and tap <b>⋮ → Install app</b>.</p><button class="btn ghost" id="install-btn" hidden>Install now</button>`)}
   ${card('About the data', `<p class="small">Squads, leagues, prices and stats come from the official Fantasy Premier League API. FPL's expected stats (xG, xA, xGC), defensive contributions and bonus points are supplied by Opta. Headlines link to Fantasy Football Scout, BBC Sport, The Guardian and Sky Sports. Gaffer is not affiliated with the Premier League, FPL, Opta or any publisher.</p>
     <button class="btn ghost" data-action="reset">Clear saved data</button>`)}
   `;
@@ -553,17 +676,25 @@ const teamColor = (id) => COLORS[tShort(id)] || '#5b4b8a';
 
 // ---------- events ----------
 document.addEventListener('click', async (ev) => {
-  const t = ev.target.closest('[data-player],[data-action],[data-rival],.sheet-close,#sheet');
+  const t = ev.target.closest('[data-player],[data-action],[data-rival],[data-creator],.sheet-close,#sheet');
   if (!t) return;
   if (t.id === 'sheet') { if (ev.target === t) closeSheet(); return; }
   if (t.classList.contains('sheet-close')) return closeSheet();
   if (t.dataset.player) { ev.preventDefault(); return playerSheet(+t.dataset.player); }
   if (t.dataset.rival) return rivalSheet(+t.dataset.rival);
+  if (t.dataset.creator) return creatorSheet(+t.dataset.creator);
   const a = t.dataset.action;
   if (a === 'refresh') return refreshAll(true);
   if (a === 'reload-league') {
     $('#main').innerHTML = `<div class="loading">Refreshing league…</div>`;
     await loadLeague(+t.dataset.id, true).catch((e) => toast(e.message));
+    return render();
+  }
+  if (a === 'add-creator' || a === 'remove-creator') {
+    saveCreatorsForm(false);
+    if (a === 'add-creator') settings.creators.push({ name: '', yt: null, ytId: null, fplId: null });
+    else settings.creators.splice(+t.dataset.i, 1);
+    saveSettings();
     return render();
   }
   if (a === 'reset') {
@@ -595,6 +726,12 @@ document.addEventListener('submit', async (ev) => {
     await loadCore(true).catch((e) => toast(e.message));
     toast(`Found ${entry.name}`);
     render();
+  }
+  if (f.id === 'creators-form') {
+    saveCreatorsForm(true);
+    state.creators = null;
+    toast('Saved');
+    return render();
   }
   if (f.id === 'league-form') {
     const fd = new FormData(f);
@@ -643,6 +780,17 @@ document.addEventListener('click', async (e) => {
 setInterval(() => document.querySelectorAll('[data-countdown]').forEach((el) => (el.textContent = countdown(el.dataset.countdown))), 30000);
 
 // ---------- boot ----------
+function saveCreatorsForm(dropEmpty) {
+  const form = $('#creators-form');
+  if (!form) return;
+  const rows = [...form.querySelectorAll('.creator-row')].map((fs) => {
+    const v = (n) => fs.querySelector(`[name=${n}]`).value;
+    return { name: v('name').trim(), ...parseYt(v('yt')), fplId: parseFplId(v('fpl')) };
+  });
+  settings.creators = dropEmpty ? rows.filter((r) => r.name || r.yt || r.ytId || r.fplId) : rows;
+  saveSettings();
+}
+
 async function loadLeaguesInBackground(fresh = false) {
   for (const id of settings.leagues) {
     try { await loadLeague(id, fresh); } catch (e) { console.warn('league', id, e); }
@@ -664,6 +812,8 @@ async function refreshAll(fresh = false) {
   deadlineReminder();
   news({ fresh }).then((n) => { state.news = n; if ((location.hash.slice(1) || 'home').startsWith('home')) render(); }).catch(() => {});
   if (settings.teamId) {
+    state.creators = null;
+    loadCreators(fresh).then(() => { if (location.hash.startsWith('#creators')) render(); }).catch(() => {});
     state.leagues.clear();
     await loadLeaguesInBackground(fresh);
     if (!(location.hash.slice(1) || 'home').startsWith('home')) render();

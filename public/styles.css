@@ -214,3 +214,13 @@ details summary { cursor: pointer; color: var(--info); margin-bottom: 6px; }
 
 #toast { position: fixed; bottom: calc(80px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%) translateY(20px); background: #1b1426; color: #fff; padding: 9px 16px; border-radius: 999px; font-size: 14px; opacity: 0; transition: .2s; pointer-events: none; z-index: 60; max-width: calc(100% - 32px); }
 #toast.show { opacity: 1; transform: translateX(-50%); }
+
+.cstats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-bottom: 8px; }
+@media (min-width: 560px) { .cstats { grid-template-columns: repeat(4, 1fr); } }
+.cstats div { background: var(--surface-2); border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; min-width: 0; }
+.cstats span { font-size: 11px; color: var(--muted); }
+.cstats b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.small-btn { padding: 6px 12px; font-size: 13px; }
+.creator-row { border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin: 0; width: 100%; display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+.creator-row input { width: 200px; }
+.tabs a { font-size: 10.5px; }

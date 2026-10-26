@@ -1,0 +1,37 @@
+name: Build Android app
+
+on:
+  push:
+    branches: [main]
+    paths: ['android/**', '.github/workflows/android.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease -PversionCode=${{ github.run_number }} --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk ../gaffer.apk
+      - name: Publish to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-v1.0.${{ github.run_number }}
+          name: Gaffer Android 1.0.${{ github.run_number }}
+          body: |
+            Download **gaffer.apk** below on your Android phone and open it to install.
+            First time only: allow your browser to "install unknown apps" when asked.
+          files: gaffer.apk
+          make_latest: true

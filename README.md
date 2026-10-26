@@ -6,6 +6,7 @@ A phone-first web app for Fantasy Premier League that installs on Android like a
 - **My team** – your squad on a pitch with next fixture and projected points, captain picks (with % of rivals captaining each), transfer ideas, and a stats table (xGI/90, ownership, rival ownership, fixture run).
 - **Leagues** – for each league you track: a game plan in plain English, a table comparing you with the rivals above and just below you (gap, live GW points, projected points, shared players, captain, chips left, team value, hits), the players they own that you don't ("threats"), and your differentials. Tap a rival to see their squad, transfers and chips.
 - **Insights** – top projected players by position, a fixture ticker, "due a goal" (xG above goals), players running hot, xGI per 90 leaders, differentials, value picks, most transferred in/out and price changes.
+- **Creators** – follow FPL YouTubers (Let's Talk FPL and FPL Harry are set up; add more): their latest videos, their FPL squad, captain, transfers and chips, and the players they own that you don't. Add each creator's FPL team ID or team link in the app.
 - **News** – injury and availability news for your players and your rivals' players, plus headlines from Fantasy Football Scout, BBC Sport, The Guardian and Sky Sports (headline + link to the original).
 - **Updates** – "since you last checked": rank changes, rival transfers and chips played. Optional notifications when the app is opened, plus a 24-hour deadline reminder.
 
@@ -36,10 +37,18 @@ The server is required because browsers can't call the FPL API directly.
 - **Render** (free): push this folder to a GitHub repo, then on render.com choose *New → Blueprint* and pick the repo (`render.yaml` is included).
 - **Any Docker host** (Fly.io, Railway, a VPS): `docker build -t gaffer . && docker run -p 3000:3000 gaffer`
 
-### Install on Android
-Open your hosted URL in Chrome → **⋮ → Add to Home screen / Install app**. It opens full-screen with its own icon and works offline with the last data it loaded.
+### Android app
+The `android/` folder is a small native app that opens your hosted Gaffer full-screen. Your server address is set in `android/app/src/main/res/values/strings.xml` (`app_url`).
 
-Want a Play Store APK? Run [Bubblewrap](https://github.com/GoogleChromeLabs/bubblewrap) against your hosted URL (`npx @bubblewrap/cli init --manifest https://YOUR-URL/manifest.webmanifest`) to wrap it as a Trusted Web Activity.
+**Easiest: download the APK GitHub builds for you.** Every change to `android/` builds a new APK and publishes it under **Releases**. On your phone open
+`https://github.com/<you>/<repo>/releases/latest` → tap **gaffer.apk** → open it → allow "install unknown apps" once.
+You can also start a build by hand: **Actions → Build Android app → Run workflow**.
+
+**On your own laptop:** install [Android Studio](https://developer.android.com/studio), choose **Open**, pick the `android` folder, wait for it to sync, then **Build → Build App Bundle(s) / APK(s) → Build APK(s)**. Or plug your phone in (USB debugging on) and press ▶ Run.
+
+The signing key (`android/app/gaffer.keystore`) is committed so updates install over the old version. It's fine for a personal app; make a new private key before publishing to the Play Store.
+
+**Without the APK:** open your hosted URL in Chrome → **⋮ → Install app**.
 
 ## Settings you can change
 - Rivals above / below you to compare (default 5 above, 3 below)
